@@ -1,0 +1,22 @@
+{
+	"MASTER_FINGERPRINT": "",
+	"ACCT_XPUB": "", // base58 encoded xpub
+	"ACCT_PATH": "", //BASE_PATH for wallet
+	"NETWORK": "main", //"main", "test", "regt"
+	"PERMISSION": "watch", // "watch", "total"
+	"HdPubKeys": [
+		{
+			"PubKey": "",
+      		"FullKeyPath": "",
+      		"Label": "",
+			"TxCount": 0,
+			"UTXOs": [
+				{
+					"tx_id": "",
+					"idx": 0
+				}
+			]
+			  
+		}
+	]
+}

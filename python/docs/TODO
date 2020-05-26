@@ -1,0 +1,28 @@
+-Test
+	Finish Writing all tests for hardened keys
+
+-Main.py
+	new Wallet
+	write to JSONs
+		-Priv
+			master Xpub and maybe m/0'
+		-Pub
+			List of addresses used
+
+-Wallet.py
+	-import_wallet
+	
+	-add blockstream api
+		-later build own api and bloom filter
+
+-Seed
+	@fix length issues. 
+	@possibly make everything a classmethod
+
+
+-All
+	Documentation
+
+
+-Front End
+	???
