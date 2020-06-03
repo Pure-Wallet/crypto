@@ -1,5 +1,38 @@
-import blockstream.util
+import requests
 
+# --------------- API UTIL -----------------
+
+BASE_URL = 'https://blockstream.info/api/'
+
+def call_api(endpoint):
+    """
+    Build the API URL and request data
+    :param str endpoint: specific api endpoint to hit
+    :return response: server's reponse to the request
+    """
+    url = BASE_URL + endpoint
+    try:  # try to get json data
+        response = requests.get(url).json()
+    except ValueError:  # if bytes, convert to str
+        response = requests.get(url).content.decode('utf-8')
+    except Exception as e:
+        response = e
+    return handle_response(response)
+
+
+def handle_response(response):
+    """
+    Responses from blockstream's API are returned in json or str
+    :param response: http response object from requests library
+    :return response: decoded response from api
+    """
+    if isinstance(response, Exception):
+        print(response)
+        return response
+    else:
+        return response
+
+# ---------------FUNCTIONS-----------------
 
 def get_transaction(tx_id):
     """
@@ -8,7 +41,7 @@ def get_transaction(tx_id):
     :return: an instance of :class:`Transaction` class
     """
     resource = f'tx/{tx_id}'
-    tx_data = util.call_api(resource)
+    tx_data = call_api(resource)
     return Transaction(tx_data)
 
 
@@ -19,7 +52,7 @@ def get_transaction_status(tx_id):
     :return: an instance of :class:`TransactionStatus` class
     """
     resource = f'tx/{tx_id}/status'
-    response = util.call_api(resource)
+    response = call_api(resource)
     return TransactionStatus(response)
 
 
@@ -30,7 +63,7 @@ def get_transaction_hex(tx_id):
     :return: dictionary containing tx hex
     """
     resource = f'tx/{tx_id}/hex'
-    response = util.call_api(resource)
+    response = call_api(resource)
     return response  # figure this better maybe
 
 
@@ -41,7 +74,7 @@ def get_transaction_merkle_proof(tx_id):
     :return: an instance of :class:`TransactionMerkle` class
     """
     resource = f'tx/{tx_id}/merkle-proof'
-    response = util.call_api(resource)
+    response = call_api(resource)
     return TransactionMerkleProof(response)
 
 
@@ -53,7 +86,7 @@ def get_transaction_output_status(tx_id, vout):
     :return: an instance of :class:`TransactionOutput` class
     """
     resource = f'tx/{tx_id}/outspend/{vout}'
-    response = util.call_api(resource)
+    response = call_api(resource)
     return TransactionOutput(response)
 
 
@@ -64,7 +97,7 @@ def get_all_transaction_outputs_statuses(tx_id):
     :return list: a list of :class:`TransactionOutput` objects
     """
     resource = f'tx/{tx_id}/outspends'
-    response = util.call_api(resource)
+    response = call_api(resource)
     outspends = []
     for output in response:
         outspends.append(TransactionOutput(output))
@@ -85,7 +118,7 @@ def get_address(address):
     :return: an instance of :class:`Address` class
     """
     resource = f'address/{address}'
-    response = util.call_api(resource)
+    response = call_api(resource)
     #print(Address(response))
     return Address(response)
 
@@ -94,7 +127,7 @@ def get_address_transactions(address):
     Request all transactions for an address, newest first
     """
     resource = f'address/{address}/txs'
-    response = util.call_api(resource)
+    response = call_api(resource)
     transactions = []
     for tx in response:
         transactions.append(Transaction(tx))
@@ -110,7 +143,7 @@ def get_confirmed_transaction_history(address, ls_tx_id=''):
     :return list: 
     """
     resource = f'address/{address}/txs/chain/{ls_tx_id}'
-    response = util.call_api(resource)
+    response = call_api(resource)
     confirmed_transactions = []
     for tx in response:
         confirmed_transactions.append(Transaction(tx))
@@ -125,7 +158,7 @@ def get_address_mempool(address):
     :return list: a list of :class:`Transaction` objects
     """
     resource = f'address/{address}/txs/mempool'
-    response = util.call_api(resource)
+    response = call_api(resource)
     mempool_transactions = []
     for tx in response:
         mempool_transactions.append(Transaction(tx))
@@ -140,7 +173,7 @@ def get_address_utxo(address):
     :return list: a list of :class:`UTXO` objects
     """
     resource = f'address/{address}/utxo'
-    response = util.call_api(resource)
+    response = call_api(resource)
     utxo_list = []
     for utxo in response:
         utxo_list.append(UTXO(utxo))
@@ -154,7 +187,7 @@ def get_block_by_hash(block_hash):
     :return: an instance of :class:`Block` class
     """
     resource = f'block/{block_hash}'
-    response = util.call_api(resource)
+    response = call_api(resource)
     return Block(response)
 
 
@@ -166,7 +199,7 @@ def get_block_by_height(height):
     """
     block_hash = get_block_hash_from_height(height)
     resource = f'block/{block_hash}'
-    response = util.call_api(resource)
+    response = call_api(resource)
     return Block(response)
 
 
@@ -177,7 +210,7 @@ def get_block_hash_from_height(height):
     :return: a bitcoin block address
     """
     resource = f'block-height/{height}'
-    return util.call_api(resource)
+    return call_api(resource)
 
 
 def get_block_status(block_hash):
@@ -187,7 +220,7 @@ def get_block_status(block_hash):
     :return: an instance of :class:`BlockStatus` class
     """
     resource = f'block/{block_hash}/status'
-    response = util.call_api(resource)
+    response = call_api(resource)
     return BlockStatus(response)
 
 
@@ -199,7 +232,7 @@ def get_block_transactions(block_hash, start_index='0'):
     :param str start_index: index of transaction list to start from
     """
     resource = f'block/{block_hash}/txs/{start_index}'
-    response = util.call_api(resource)
+    response = call_api(resource)
     transactions = []
     for tx in response:
         transactions.append(Transaction(tx))
@@ -213,7 +246,7 @@ def get_transaction_ids(block_hash):
     :return: a list of transaction IDs in the block
     """
     resource = f'block/{block_hash}/txids'
-    response = util.call_api(resource)
+    response = call_api(resource)
     return response
 
 
@@ -225,7 +258,7 @@ def get_blocks(start_height=''):
     :return: a list of :class:`Block` objects
     """
     resource = f'blocks/{start_height}'
-    response = util.call_api(resource)
+    response = call_api(resource)
     blocks = []
     for block in response:
         blocks.append(Block(block))
@@ -238,7 +271,7 @@ def get_last_block_height():
     :return dict: most recent block height in bitcoin
     """
     resource = 'blocks/tip/height'
-    return util.call_api(resource)
+    return call_api(resource)
 
 
 def get_last_block_hash():
@@ -246,14 +279,14 @@ def get_last_block_hash():
     Request the hash of the last block
     """
     resource = 'blocks/tip/hash'
-    return util.call_api(resource)
+    return call_api(resource)
 
 
 def get_mempool():
     """
     Request mempool backlog statistics
     """
-    response = util.call_api('mempool')
+    response = call_api('mempool')
     return Mempool(response)
 
 
@@ -264,7 +297,7 @@ def get_mempool_transaction_ids():
     :return list: a list of transaction IDs
     """
     resource = 'mempool/txids'
-    return util.call_api(resource)
+    return call_api(resource)
 
 
 def get_mempool_recent_transactions():
@@ -273,7 +306,7 @@ def get_mempool_recent_transactions():
     :return list: a list of transaction IDs
     """
     resource = 'mempool/recent'
-    response = util.call_api(resource)
+    response = call_api(resource)
     transactions = []
     for tx in response:
         transactions.append(MempoolRecent(tx))
@@ -286,7 +319,7 @@ def get_fee_estimates():
     of blocks) and the value is estimated fee rate (in sat/vB)
     :return: an instance of :class:`FeeEstimate` class
     """
-    response = util.call_api('fee-estimates')
+    response = call_api('fee-estimates')
     return FeeEstimates(response)
 
 

@@ -1,7 +1,28 @@
 import json
 import blockstream.blockexplorer
 from seed import *
+from helper import hash256
 
+
+
+class UTXO:
+	"""
+	class for holding a UTXO info:
+		-txid (str)
+		-index (int)
+		-value (int) in sats
+	"""
+	def __init__(self, txid, idx, value):
+		self.txid = txid
+		self.idx = idx
+		self.value = value
+
+	def to_dict(self):
+		return {
+			"tx_id": self.txid,
+			"idx": self.idx,
+			"value": self.value
+		}
 
 class HDPubKey:
 	"""
@@ -17,7 +38,7 @@ class HDPubKey:
 		self.path = path
 		self.label = label
 		self.txcount = 0
-		self.balance = 0
+		self.utxos = []
 		self.check_state()
 
 	def __repr__(self):
@@ -30,34 +51,44 @@ class HDPubKey:
 		return r + "\n"
 
 	def to_dict(self):
+		utxo_list = []
+		for utxo in self.utxos:
+			utxo_list.append(utxo.to_dict())
 		return {
 			"PubKey": self.pubkey.sec().hex(),
 			"FullKeyPath": self.path,
 			"Label": self.label,
 			"TxCount": self.txcount,
-			"Balance": self.balance
+			"UTXOs": utxo_list
 		}
 
 	def check_state(self):
 		addr = self.pubkey.address()
-		tx_hist = blockexplorer.get_address_transactions(addr).chain_stats
+		tx_hist = blockstream.blockexplorer.get_address(addr).chain_stats
 		self.txcount = tx_hist['tx_count']
 		self.balance = tx_hist['funded_txo_sum'] - tx_hist['spent_txo_sum']
 		return self.balance
-	def get_utxos(self):
+
+	def get_balance(self):
+		
+
+	def set_utxos(self):
 		addr = self.pubkey.address()
-		utxos = blockexplorer.get_address_utxo(addr)
+		utxos = blockstream.blockexplorer.get_address_utxo(addr)
 		sats = 0
 		for utxo in utxos:
 			sats += utxo.value
+			utxo
 		self.balance = sats
-		return 
+
+	def get_utxos(self):
+		return self.utxos
 
 	def is_used(self):
 		return self.txcount > 0
 
 	def empty(self):
-		return self.balance == 0
+		return self.get_balance() == 0
 
 	def set_label(self, label):
 		self.label = label
@@ -65,10 +96,12 @@ class HDPubKey:
 	
 
 class Wallet:
-	DEFAULT_GAP_LIMIT = 15
+	DEFAULT_GAP_LIMIT = 5
 	BASE_PATH = "76'/0'/"
 	"""
 	A class for storing a single Seed or ExtendedKey in order to manage UTXOs, craft transactions, and more.
+	Contains a wallet account (2 layers of depth) and an external (0) and internal (1) account chain, as 
+	specified in BIP0032
 	"""
 	def __init__(self, name="Wallet0", passphrase="", testnet=False, data=None, watch_only=False):
 		self.name = name
@@ -78,7 +111,9 @@ class Wallet:
 		self.watch_only = watch_only
 		
 		self.wallet_acct = self.BASE_PATH
-		self.acct_chain = 0 # used as 3th layer of derivation path before 4th layer = keys
+		# this standard is defined in BIP0032
+		self.ext_chain = 0 # used as 3th layer of derivation path before 4th layer = keys
+		self.int_chain = 1 # used as internal chain, for change addr etc.
 		self.balance = 0
 		self.gap_limit = self.DEFAULT_GAP_LIMIT
 		
@@ -89,27 +124,30 @@ class Wallet:
 			if type(data) == Seed:
 				self.seed = data
 				self.master_xprv = data.derive_master_priv_key(passphrase=passphrase, testnet=testnet)
-				self.acct_xpub = self.derive_key((self.wallet_acct + str(self.acct_chain)), priv=True).to_extended_pub_key()
+				self.ext_xpub = self.derive_key((self.wallet_acct + str(self.ext_chain)), priv=True).to_extended_pub_key()
+				self.int_xpub = self.derive_key((self.wallet_acct + str(self.int_chain)), priv=True).to_extended_pub_key()
 			elif type(data) == ExtendedPrivateKey:
 				self.master_xprv = data
-				self.acct_xpub = self.derive_key((self.wallet_acct + str(self.acct_chain)), priv=True).to_extended_pub_key()
+				self.ext_xpub = self.derive_key((self.wallet_acct + str(self.ext_chain)), priv=True).to_extended_pub_key()
+				self.int_xpub = self.derive_key((self.wallet_acct + str(self.int_chain)), priv=True).to_extended_pub_key()
 				self.seed = None
-			elif type(data) == ExtendedPublicKey:
-				self.acct_xpub = data
+			elif type(data) == ExtendedPublicKey: # not fully thought-out. Fix Later
+				self.ext_xpub = data
 				self.master_xprv = None
 
 			elif type(data) == str:
 				if data[:4] == "xprv":
 					try:
 						self.master_xprv = ExtendedPrivateKey.parse(data)
-						self.acct_xpub = self.derive_key(self.wallet_acct, priv=True).to_extended_pub_key()
+						self.ext_xpub = self.derive_key(self.wallet_acct + str(self.ext_chain), priv=True).to_extended_pub_key()
+						self.int_xpub = self.derive_key((self.wallet_acct + str(self.int_chain)), priv=True).to_extended_pub_key()
 						self.seed = None
 					
 					except ConfigurationError:
 						raise ConfigurationError("Invalid master XPRIV key.")
-				elif data[:4] == "xpub":
+				elif data[:4] == "xpub": # not useful. Think through
 					try:
-						self.acct_xpub = ExtendedPublicKey.parse(data)
+						self.ext_xpub = ExtendedPublicKey.parse(data)
 						self.master_xprv = None
 					except ConfigurationError:
 						raise ConfigurationError("Invalid master XPUB key.")
@@ -119,26 +157,26 @@ class Wallet:
 		for _ in range(self.gap_limit):
 			self.new_pub_key()
 		# Scan them all
-		sats = 0
-		for hpk in self.hdpubkeys:
-			sats += hpk.check_state() # returns balance of pukey, also updates balance and txcount
-		self.balance = sats
+		self.check_state()
 
 	def mnemonic(self):
 		if self.seed:
 			return self.seed.mnemonic()
-		if self._is_watch_only():
+		if self.watch_only:
 			raise TypeError("Wallet is watch-only. Seed unknown.")
 		if self.seed is None and self.master_xprv is not None:
 			raise TypeError("Wallet was created from ExtendedPrivateKey. Seed unknown.")
 
 	def derive_key(self, path, priv):
+		"""
+		General function for deriving any key in the 
+		"""
 		# if levels.pop() != "m":
 		# 	raise ConfigurationError(f"Path must begin with \'m/\'. Begins with {path[0:2]}")
 		if priv:
-			levels = path.split("/")
 			if self.watch_only:
 				raise TypeError("Watch only wallets cannot access Private Keys.")
+			levels = path.split("/")
 			child = self.master_xprv
 			for i in levels:
 				if i[-1] == "'":
@@ -147,8 +185,8 @@ class Wallet:
 					child = child.derive_priv_child( int(i) )
 		# public keys
 		else:
-			child = self.acct_xpub
-			#self.acct_xpub is already the xpub for wallet_acct
+			child = self.ext_xpub
+			#self.ext_xpub is already the xpub for wallet_acct
 			# if self.wallet_acct in path:
 			# 	path.replace(self.wallet_acct, "")
 			levels = path.split("/")
@@ -161,24 +199,42 @@ class Wallet:
 
 		return child
 
-
 	def new_pub_key(self, label=""):
+		""" generates and returns the next pubkey from the external chain and adds an HDPubKey to self.hdpubkeys"""
 		path = str(self.key_count)
 		pubkey = self.derive_key(path, priv=False).to_pub_key()
 		self.key_count+=1
-		fullpath = self.wallet_acct + str(self.acct_chain) + "/" + path
+		fullpath = self.wallet_acct + str(self.ext_chain) + "/" + path
 		hpk = HDPubKey(pubkey, path=fullpath, label=label)
 		hpk.check_state()
 		self.hdpubkeys.append(hpk)
 		return pubkey
 
 	def new_address(self, label=""):
+		""" returns unused address and stores the associated pubkey in self.hdpubkeys """
 		return self.new_pub_key(label=label).address()
 
+	def check_state(self):
+		""" calls check_state on each hdPubKey. Sets balance and updates txcount. """
+		sats = 0
+		for hpk in self.hdpubkeys:
+			sats += hpk.check_state() #returns balance of pukey, also updates balance and txcount
+		self.balance = sats
+
 	def get_balance(self):
+		""" sets and returns wallet balance """
 		sats = 0
 		for hpk in self.hdpubkeys:
 			sats += hpk.get_balance()
+		self.balance = sats
+		return sats
+
+	def get_priv_key(self, pubkey):
+		""" gets corresponding privkey from a pubkey using pubkey.path """
+		if self.watch_only:
+			raise TypeError("Watch only wallet")
+		return self.derive_key(pubkey.path, priv=True)
+			
 
 #----- EXTERNAL FUNCTIONS -----
 #
@@ -190,22 +246,8 @@ class Wallet:
 		HdPubKeys = []
 		data = {}
 		with open(f"{filename}.json", "w+") as fp:
-			wallet = json.load(fp)
 			#verify file matches wallet
-			c_wallet = True
-			if wallet["XPUB"] != self.acct_xpub.__repr__():
-				c_wallet = False
-			if wallet["wallet_acct"] != self.wallet_acct:
-				c_wallet = False
-			if self.testnet:
-				if wallet["NETWORK"] != "test":
-					c_wallet = False
-			else:
-				if wallet["NETWORK"] != "main":
-					c_wallet = False
-
-			if c_wallet == False:
-				raise ConfigurationError("Invalid Wallet. Import failed.")
+			wallet = self.verify_file(fp)
 			#write wallet data
 
 
@@ -219,8 +261,22 @@ class Wallet:
 				if not found:
 					wallet["HdPubKeys"].append(hpk.to_dict())
 
-	
-		
+	def verify_file(self, fp):
+		wallet = json.load(fp)
+		c_wallet = True
+		if wallet["XPUB"] != self.ext_xpub.__repr__():
+			c_wallet = False
+		elif wallet["wallet_acct"] != self.wallet_acct:
+			c_wallet = False
+		elif self.testnet:
+			if wallet["NETWORK"] != "test":
+				c_wallet = False
+		elif wallet["NETWORK"] != "main":
+			c_wallet = False
+		if c_wallet == False:
+			raise ConfigurationError("Incorrect Wallet. Import failed.")
+		else:
+			return wallet
 
 	def write_secret(self, filename=""):
 		if filename == "":
@@ -240,8 +296,15 @@ class Wallet:
 
 if __name__ == "__main__":
 	
-	xpub = "xpub6CT7mqgEZmPk3MJsNYD5fL37ioKQYxuXLBgvGT5x2CchY8KbUPmYkKVGUXyp5YxbM2YrJtkutp8gLbgnoBtPYnBKxCR7erW2pjs42cMFPTB"
-	#s = Seed.new(128)
-	w = Wallet(data=xpub, watch_only=True)
-	print(w.acct_xpub)
-	print(w.balance)
+	#xpub = "xpub6CT7mqgEZmPk3MJsNYD5fL37ioKQYxuXLBgvGT5x2CchY8KbUPmYkKVGUXyp5YxbM2YrJtkutp8gLbgnoBtPYnBKxCR7erW2pjs42cMFPTB"
+	s = Seed.new(128)
+	w = Wallet(data=s, watch_only=False)
+	# print(w.ext_xpub)
+	# print(w.master_xprv)
+	# print(len(w.hdpubkeys))
+	# print(w.balance)
+	msg = int.from_bytes(hash256(b'Hello Sachin'), 'big')
+	pub = w.new_pub_key()
+	priv = w.get_priv_key(w.hdpubkeys[-1]).to_priv_key()
+	sig = priv.sign(msg)
+	print(pub.verify(msg, sig))
