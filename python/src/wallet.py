@@ -3,10 +3,9 @@ import blockstream.blockexplorer
 from seed import *
 from helper import hash256
 
-
-
 class UTXO:
 	"""
+	UNUSED
 	class for holding a UTXO info:
 		-txid (str)
 		-index (int)
@@ -33,22 +32,17 @@ class HDPubKey:
 	-Label
 	Inspiration from Wasabi Wallet.
 	"""
-	def __init__(self, pubkey, path, label):
+	def __init__(self, pubkey, path, label=[]):
 		self.pubkey = pubkey
 		self.path = path
 		self.label = label
 		self.txcount = 0
-		self.utxos = []
+		self.balance = 0
 		self.check_state()
 
 	def __repr__(self):
-		r = f"""\"PubKey\": {self.pubkey.sec().hex()},\n\
-			\"FullKeyPath\": {self.path},\n\
-			\"Label\": {self.label},\n\
-			\"Count\": {self.count},\n\
-			\"UTXOs\": {self.utxos}
-			""".strip()
-		return r + "\n"
+		return f"\"PubKey\": {self.pubkey.sec().hex()},\n\"FullKeyPath\": {self.path},\n\"Label\": {", ".join(self.label)},\n\"Count\": {self.txcount},\n\"Balance\": {self.balance}"
+		
 
 	def to_dict(self):
 		utxo_list = []
@@ -63,37 +57,30 @@ class HDPubKey:
 		}
 
 	def check_state(self):
+		"""
+		sets txcount and balance. returns balance
+		"""	
 		addr = self.pubkey.address()
 		tx_hist = blockstream.blockexplorer.get_address(addr).chain_stats
 		self.txcount = tx_hist['tx_count']
 		self.balance = tx_hist['funded_txo_sum'] - tx_hist['spent_txo_sum']
 		return self.balance
-
-	def get_balance(self):
 		
-
-	def set_utxos(self):
-		addr = self.pubkey.address()
-		utxos = blockstream.blockexplorer.get_address_utxo(addr)
-		sats = 0
-		for utxo in utxos:
-			sats += utxo.value
-			utxo
-		self.balance = sats
-
 	def get_utxos(self):
-		return self.utxos
+		addr = self.pubkey.address()
+		return blockstream.blockexplorer.get_address_utxo(addr)
 
 	def is_used(self):
 		return self.txcount > 0
 
 	def empty(self):
-		return self.get_balance() == 0
+		return self.balance == 0
 
 	def set_label(self, label):
-		self.label = label
+		self.label.append(label)
 
-	
+	def address(self, testnet=False):
+		return self.pubkey.address(testnet=testnet)
 
 class Wallet:
 	DEFAULT_GAP_LIMIT = 5
@@ -169,7 +156,7 @@ class Wallet:
 
 	def derive_key(self, path, priv):
 		"""
-		General function for deriving any key in the 
+		General function for deriving any key in the account.
 		"""
 		# if levels.pop() != "m":
 		# 	raise ConfigurationError(f"Path must begin with \'m/\'. Begins with {path[0:2]}")
@@ -205,14 +192,14 @@ class Wallet:
 		pubkey = self.derive_key(path, priv=False).to_pub_key()
 		self.key_count+=1
 		fullpath = self.wallet_acct + str(self.ext_chain) + "/" + path
-		hpk = HDPubKey(pubkey, path=fullpath, label=label)
+		hpk = HDPubKey(pubkey, path=fullpath, label=[label])
 		hpk.check_state()
 		self.hdpubkeys.append(hpk)
 		return pubkey
 
 	def new_address(self, label=""):
 		""" returns unused address and stores the associated pubkey in self.hdpubkeys """
-		return self.new_pub_key(label=label).address()
+		return self.new_pub_key(label=label).address(self.testnet)
 
 	def check_state(self):
 		""" calls check_state on each hdPubKey. Sets balance and updates txcount. """
@@ -234,7 +221,48 @@ class Wallet:
 		if self.watch_only:
 			raise TypeError("Watch only wallet")
 		return self.derive_key(pubkey.path, priv=True)
-			
+
+#----- TRANSACTION FUNCTIONS -----
+#
+#---------------------------------
+	
+	def send(self, address, amount, fee):
+		pass
+
+	def select_utxos(self, amountNfee, priority="oldest", data=None):
+    	"""
+		function for choosing utxos to use for a transaction.
+		param: amountNfee is amount to be sent including fee.
+		priority allows for options in terms of choosing 
+		which utxos to spend. Options:
+			- "oldest": uses oldest utxos first (by derivation path, not utxo age)
+			- "biggest": uses fewest and biggest utxos possible
+			- "smallest": uses fewest number of smallest utxos
+			- "below": uses ALL utxos below amount specified in data
+		"""
+		if priority == "oldest":
+			pAmount = 0
+			utxos = []
+			for pubkey in self.hdpubkeys:
+    			if "NoSpend" not in pubkey.label:
+    				if pubkey.balance > 0:
+    					utxos += pubkey.get_utxos()
+						pAmount += pubkey.balance
+						if pAmount >= amountNfee:
+    						break
+
+    	elif priority == "biggest":
+			raise NotImplementedError("Priority algorithm not implemented yet.")
+    			
+		elif priority == "smallest":
+			raise NotImplementedError("Priority algorithm not implemented yet.")
+    			
+		elif priority == "below":
+			raise NotImplementedError("Priority algorithm not implemented yet.")
+
+		return utxos
+
+	
 
 #----- EXTERNAL FUNCTIONS -----
 #
@@ -296,15 +324,7 @@ class Wallet:
 
 if __name__ == "__main__":
 	
-	#xpub = "xpub6CT7mqgEZmPk3MJsNYD5fL37ioKQYxuXLBgvGT5x2CchY8KbUPmYkKVGUXyp5YxbM2YrJtkutp8gLbgnoBtPYnBKxCR7erW2pjs42cMFPTB"
 	s = Seed.new(128)
-	w = Wallet(data=s, watch_only=False)
-	# print(w.ext_xpub)
-	# print(w.master_xprv)
-	# print(len(w.hdpubkeys))
-	# print(w.balance)
-	msg = int.from_bytes(hash256(b'Hello Sachin'), 'big')
-	pub = w.new_pub_key()
-	priv = w.get_priv_key(w.hdpubkeys[-1]).to_priv_key()
-	sig = priv.sign(msg)
-	print(pub.verify(msg, sig))
+	w = Wallet(data=s, testnet=True, watch_only=False)
+	for tpub in w.hdpubkeys:
+		print(tpub.address(w.testnet))

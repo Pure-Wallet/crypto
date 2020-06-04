@@ -11,11 +11,28 @@ class WalletTest(unittest.TestCase):
 		self.assertEqual(w.key_count, Wallet.DEFAULT_GAP_LIMIT)
 		self.assertEqual(w.key_count, len(w.hdpubkeys))
 
+# ----- Test imports -----
+#
+# ------------------------
+	def test_import_from_seed(self):
+    	pass
+	def test_import_from_xprv(self):
+    	pass
+	def test_import_from_xpub(self):
+    	pass
+# ----- Test displays -----
+#
+# ------------------------
+
 	def test_mnemonic(self):
 		pass
 
 	def test_mnemonic_fail(self):
 		pass
+
+# ----- Test Keys --------
+#
+# ------------------------
 
 	def test_new_pub_key(self):
 		pass
@@ -26,4 +43,11 @@ class WalletTest(unittest.TestCase):
 	def test_check_state(self):
 		pass
 
-	
+	def test_sign_msg(self):
+		s = Seed.new(128)
+		w = Wallet(data=s, watch_only=False)
+		msg = int.from_bytes(hash256(b'Hello Sachin'), 'big')
+		pub = w.new_pub_key()
+		priv = w.get_priv_key(w.hdpubkeys[-1]).to_priv_key()
+		sig = priv.sign(msg)
+		self.assertTrue(pub.verify(msg, sig))

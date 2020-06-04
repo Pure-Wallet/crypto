@@ -443,9 +443,8 @@ class ExtendedPublicKey:
 			raise ValueError(INVALID_KEY_MSG)
 		child_key = point + S256Point.parse(self.key)
 		child_chaincode = ii[32:]
-		
-		child_xpub = PUB_MAIN
 		#assemble new xpub
+		child_xpub = PUB_MAIN
 		if self.testnet:
 			child_xpub = PUB_TEST
 		child_xpub += (self.depth[0] + 1).to_bytes(1, 'big')

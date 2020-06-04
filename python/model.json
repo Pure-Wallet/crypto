@@ -9,14 +9,8 @@
 			"PubKey": "",
       		"FullKeyPath": "",
       		"Label": "",
-			"TxCount":,
-			"UTXOs": [
-				{
-					"tx_id": "",
-					"idx": 0,
-					"value": 0
-				}
-			]
+			"TxCount": 0,
+			"Balance": 0
 			  
 		}
 	]
