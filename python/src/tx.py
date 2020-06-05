@@ -20,7 +20,7 @@ class Tx:
         self.tx_ins = tx_ins
         self.tx_outs = tx_outs
         self.locktime = locktime
-        #self.testnet = testnet
+        self.testnet = testnet
 
     def __repr__(self):
         tx_ins = ''
