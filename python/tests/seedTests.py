@@ -1,6 +1,12 @@
 import unittest
 import json
-from src.seed import *
+from src.seed import (
+	Seed,
+	ExtendedPrivateKey,
+	ExtendedPublicKey,
+	ConfigurationError
+)
+from src.helper import hash256
 
 
 
@@ -58,7 +64,7 @@ class SeedTest(unittest.TestCase):
 		test vectors (vectors.json) taken from https://raw.githubusercontent.com/trezor/python-mnemonic/master/vectors.json
 		These are the official BIP39 test vectors
 		"""
-		f = open("vectors.json")
+		f = open("tests/vectors.json")
 		vectors = json.load(f)
 		for test in vectors["english"]:
 			entropy = test[0]

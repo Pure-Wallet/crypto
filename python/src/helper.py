@@ -60,14 +60,14 @@ def decode_base58(s):
     return combined[1:-4]
 
 
-def little_endian_to_int(b):
-    '''little_endian_to_int takes byte sequence as a little-endian number.
+def little_to_int(b):
+    '''little_to_int takes byte sequence as a little-endian number.
     Returns an integer'''
     return int.from_bytes(b, 'little')
 
 
-def int_to_little_endian(n, length):
-    '''endian_to_little_endian takes an integer and returns the little-endian
+def int_to_little(n, length):
+    '''endian_to_little takes an integer and returns the little-endian
     byte sequence of length'''
     return n.to_bytes(length, 'little')
 
@@ -77,13 +77,13 @@ def read_varint(s):
     i = s.read(1)[0]
     if i == 0xfd:
         # 0xfd means the next two bytes are the number
-        return little_endian_to_int(s.read(2))
+        return little_to_int(s.read(2))
     elif i == 0xfe:
         # 0xfe means the next four bytes are the number
-        return little_endian_to_int(s.read(4))
+        return little_to_int(s.read(4))
     elif i == 0xff:
         # 0xff means the next eight bytes are the number
-        return little_endian_to_int(s.read(8))
+        return little_to_int(s.read(8))
     else:
         # anything else is just the integer
         return i
@@ -94,11 +94,11 @@ def encode_varint(i):
     if i < 0xfd:
         return bytes([i])
     elif i < 0x10000:
-        return b'\xfd' + int_to_little_endian(i, 2)
+        return b'\xfd' + int_to_little(i, 2)
     elif i < 0x100000000:
-        return b'\xfe' + int_to_little_endian(i, 4)
+        return b'\xfe' + int_to_little(i, 4)
     elif i < 0x10000000000000000:
-        return b'\xff' + int_to_little_endian(i, 8)
+        return b'\xff' + int_to_little(i, 8)
     else:
         raise ValueError('integer too large: {}'.format(i))
 
@@ -161,21 +161,21 @@ def calculate_new_bits(previous_bits, time_differential):
 
 class HelperTest(TestCase):
 
-    def test_little_endian_to_int(self):
+    def test_little_to_int(self):
         h = bytes.fromhex('99c3980000000000')
         want = 10011545
-        self.assertEqual(little_endian_to_int(h), want)
+        self.assertEqual(little_to_int(h), want)
         h = bytes.fromhex('a135ef0100000000')
         want = 32454049
-        self.assertEqual(little_endian_to_int(h), want)
+        self.assertEqual(little_to_int(h), want)
 
-    def test_int_to_little_endian(self):
+    def test_int_to_little(self):
         n = 1
         want = b'\x01\x00\x00\x00'
-        self.assertEqual(int_to_little_endian(n, 4), want)
+        self.assertEqual(int_to_little(n, 4), want)
         n = 10011545
         want = b'\x99\xc3\x98\x00\x00\x00\x00\x00'
-        self.assertEqual(int_to_little_endian(n, 8), want)
+        self.assertEqual(int_to_little(n, 8), want)
 
     def test_base58(self):
         addr = 'mnrVtF8DWjMu839VW3rBfgYaAfKk8983Xf'

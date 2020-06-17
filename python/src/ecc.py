@@ -3,7 +3,11 @@ from unittest import TestCase
 from io import BytesIO
 import hashlib
 import hmac
-import helper
+from helper import (
+	hash160,
+	hash256,
+	encode_base58_checksum
+)
 
 from random import randint
 
@@ -219,7 +223,7 @@ class S256Point(Point):
 			return S256Point(x, odd_beta)    # Why can't this be self.__class__
 
 	def hash160(self, compressed=True):
-		return helper.hash160(self.sec(compressed))
+		return hash160(self.sec(compressed))
 	
 	def address(self, compressed=True, testnet=False):
 		'''Returns address string'''
@@ -227,7 +231,7 @@ class S256Point(Point):
 		prefix = b'\x00'
 		if testnet:
 			prefix = b'\x6f'
-		return helper.encode_base58_checksum(prefix + h160)
+		return encode_base58_checksum(prefix + h160)
 
 # Generator Point. (secret * G) = PubKey
 G = S256Point(
@@ -235,6 +239,10 @@ G = S256Point(
     0x483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8, 
 	S256Field(A),
 	S256Field(B))
+
+class SignatureError(Exception):
+	""" An error was encountered while signing or verifying a signature """
+	pass
 
 class Signature:
 	def __init__(self, r, s):
@@ -332,7 +340,7 @@ class PrivateKey:
 			suffix = b'\x01'
 		else:
 			suffix = b''
-		return helper.encode_base58_checksum(prefix + secret_bytes + suffix)
+		return encode_base58_checksum(prefix + secret_bytes + suffix)
 
 # my funcs (extra)
 def add_Points():
@@ -362,7 +370,7 @@ def check_sig():
 
 def sign():
 	e = 12345
-	z = int.from_bytes(helper.hash256(b'Programming Bitcoin!'), 'big')
+	z = int.from_bytes(hash256(b'Programming Bitcoin!'), 'big')
 	k = 1234567890
 	r = (k*G).x.num
 	k_inv = pow(k, N-2, N)

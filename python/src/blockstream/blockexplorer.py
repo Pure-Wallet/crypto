@@ -2,7 +2,7 @@ import requests
 
 # --------------- API UTIL -----------------
 
-BASE_URL = 'https://blockstream.info/api/'
+BASE_URL = 'https://blockstream.info/testnet/api/'
 
 def call_api(endpoint):
     """
@@ -436,4 +436,4 @@ class FeeEstimates:
         self.tenzeroeight_blocks = data['1008']
 
 if __name__ == "__main__":
-    print(type(get_address_utxo("19THMDmssYUEUpRWrAa3zhE6xvR4ZPM4o4")[0].vout))
+    print(get_transaction("c73a2a853f086d23dd02e91a68b0c530b507897e1b048c2a0626094781e05539").id)

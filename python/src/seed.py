@@ -37,6 +37,8 @@ PRIV_TEST = b"\x04\x35\x83\x94"
 PUB_MAIN = b"\x04\x88\xb2\x1e"
 PUB_TEST = b"\x04\x35\x87\xcf"
 
+STRENGTHS = [128, 160, 192, 224, 256]
+CS_STRENGTHS = [132, 165, 198, 233, 264]
 SOFT_CAP = 2**31 #2**31 = range of unhardened keys
 HARD_CAP = SOFT_CAP<<1 #2**32 = range of hardened keys
 PBKDF2_ROUNDS = 2048
@@ -99,7 +101,8 @@ class Seed:
 		if lang != "english":
 			raise ConfigurationError(f"Language {lang} not implemented. Use English, Spanish, French, Japanese, Chinese, Korean, or Italian.")
 		self.bits = bits
-		self.strength = strength
+		self.check_sum()
+		self.strength = strength if bits == "" else (len(bits) - len(bits)//33)
 		#taken from Trezor Ref-Implementation
 		with open("%s/%s.txt" % (get_directory(), lang), "r", encoding="utf-8") as f:
 			self.wordlist = [w.strip() for w in f.readlines()]
@@ -117,12 +120,17 @@ class Seed:
 		""" takes entropy as hex string and converts to bits. """
 		if self.bits != "":
 			raise ConfigurationError("Bits cannot be altered once set. Create a new Seed object.")
+		#if len(entropy) in [s//4 for s in STRENGTHS]:
 		strength = len(entropy)*4
 		checksumlen = strength//32
 		entropy = bytes(bytearray.fromhex(entropy))
 		chash = sha256(entropy).hexdigest()
 		checksum = bin(int(chash, 16))[2:].zfill(256)[:checksumlen]
 		entropy = bin(int.from_bytes(entropy, 'big'))[2:].zfill(strength) + checksum
+		# elif len(entropy) in [s//4 for s in CS_STRENGTHS]:
+		# 	pass
+		# else:
+		# 	raise ConfigurationError("Invalid Entropy Length")
 		self.bits = entropy
 		self.strength = strength
 
@@ -133,8 +141,8 @@ class Seed:
 		"""
 		if self.strength != 0 and self.strength != strength:
 				raise ConfigurationError(f"Strength already set to {self.strength}. Cannot be changed to {strength}.")
-		if strength not in [128, 160, 192, 224, 256]:
-				raise ConfigurationError(f"strength must be in [128, 160, 192, 224, 256], not {strength}")
+		if strength not in STRENGTHS:
+				raise ConfigurationError(f"strength must be in {STRENGTHS}, not {strength}")
 		checksumlen = strength//32
 		rand = getRandom(strength)
 		chash = sha256(rand).digest()
@@ -148,8 +156,8 @@ class Seed:
 		"""
 		classmethod for generating new Seed object with entropy from getRandom
 		"""
-		if strength not in [128, 160, 192, 224, 256]:
-			raise ConfigurationError(f"Strength must be in [128, 160, 192, 224, 256], not {strength}")
+		if strength not in STRENGTHS:
+			raise ConfigurationError(f"Strength must be in {STRENGTHS}, not {strength}")
 		checksumlen = strength//32
 		rand = getRandom(strength)
 		chash = sha256(rand).hexdigest()
@@ -200,6 +208,22 @@ class Seed:
 			return cls(entropy, lang)
 		else:
 			raise ValueError("Seed::parse requires entropy bits as binary string")
+
+	@classmethod
+	def from_bytes(cls, data, lang="english"):
+		"""
+		Load a seed from bytes (including checksum)
+		bytes -> bits
+		"""
+		checksumlen = len(data)//4
+		chash = sha256(data).digest()
+		checksum = bin(int.from_bytes(chash, 'big'))[2:].zfill(256)[:checksumlen]
+		#print("seedlen2:",len(data))
+		strength = len(data)*8
+		#print("strength:",strength)
+		bits = bin(int.from_bytes(data, 'big'))[2:].zfill(strength)
+		bits += checksum
+		return cls(bits, strength=strength, lang=lang)
 
 	def check_sum(self):
 		"""
@@ -367,6 +391,12 @@ class ExtendedPrivateKey:
 		if self.checksum != hash256(xprv)[:4]:
 			return False
 		return True
+
+	def to_bytes(self):
+		xprv = PRIV_MAIN if self.testnet else PRIV_TEST
+		xprv += self.depth + self.parent + self.child_num
+		xprv += self.chaincode + self.key + self.checksum
+		return xprv
 
 	@classmethod
 	def from_seed(cls, seed, passphrase=""):

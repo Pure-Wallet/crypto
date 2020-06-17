@@ -15,11 +15,11 @@ class WalletTest(unittest.TestCase):
 #
 # ------------------------
 	def test_import_from_seed(self):
-    	pass
+		pass
 	def test_import_from_xprv(self):
-    	pass
+		pass
 	def test_import_from_xpub(self):
-    	pass
+		pass
 # ----- Test displays -----
 #
 # ------------------------
@@ -29,6 +29,15 @@ class WalletTest(unittest.TestCase):
 
 	def test_mnemonic_fail(self):
 		pass
+
+	def test_mnemonic_recovery(self):
+		s = Seed.new(128)
+		w = Wallet(data=s, testnet=False, watch_only=False)
+		wList = [pubkey.pubkey for pubkey in w.hdpubkeys]
+		m = w.mnemonic()
+		w2 = Wallet.from_mnemonic(mnemonic=m)
+		w2List = [pubkey.pubkey for pubkey in w2.hdpubkeys]
+		self.assertEqual(wList, w2List)
 
 # ----- Test Keys --------
 #
@@ -51,3 +60,7 @@ class WalletTest(unittest.TestCase):
 		priv = w.get_priv_key(w.hdpubkeys[-1]).to_priv_key()
 		sig = priv.sign(msg)
 		self.assertTrue(pub.verify(msg, sig))
+
+	
+if __name__ == "__main__":
+	unittest.main()

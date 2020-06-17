@@ -1,23 +1,19 @@
 -Test
-	Finish Writing all tests for hardened keys
+	Finish Wallet tests
 
 -Main.py
 	new Wallet
-	write to JSONs
 		-Priv
-			master Xpub and maybe m/0'
-		-Pub
-			List of addresses used
-
+			
 -Wallet.py
-	-import_wallet
-	
-	-add blockstream api
-		-later build own api and bloom filter
-
+	-change keys label
+	-verify fil
+	-addr checks
+	-psbt
+	-later build own api and bloom filter
+	-maybe store pubkey as bytes?
 -Seed
-	@fix length issues. 
-	@possibly make everything a classmethod
+	-maybe store entropy as bytes?
 
 
 -All

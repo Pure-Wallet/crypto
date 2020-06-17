@@ -123,7 +123,9 @@ class Script:
                     result += int_to_little(77, 1)
                     result += int_to_little(length, 2)
                 else:
-                    raise ValueError('too long an cmd')
+                    raise ValueError('too long a cmd')
+                if type(cmd) == str:
+                    print(cmd)
                 result += cmd
         return result
 
