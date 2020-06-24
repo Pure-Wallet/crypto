@@ -6,3 +6,4 @@ src/__pycache__
 dump.txt
 **/*.dat
 **/*.pyc
+.DS_STORE
