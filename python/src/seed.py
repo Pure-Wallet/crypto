@@ -104,7 +104,7 @@ class Seed:
 		self.check_sum()
 		self.strength = strength if bits == "" else (len(bits) - len(bits)//33)
 		#taken from Trezor Ref-Implementation
-		with open("%s/%s.txt" % (get_directory(), lang), "r", encoding="utf-8") as f:
+		with open(f"{get_directory()}/{lang}.txt", "r", encoding="utf-8") as f:
 			self.wordlist = [w.strip() for w in f.readlines()]
 		if len(self.wordlist) != RADIX:
 			error = f"Wordlist should contain {RADIX} words, but it contains {len(self.wordlist)} words."
