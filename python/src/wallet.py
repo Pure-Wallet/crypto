@@ -1,32 +1,49 @@
 import json
+from io import BytesIO
 from blockstream.blockexplorer import (
 	get_address,
-	get_address_utxo
+	get_address_utxo,
+	get_transaction_hex,
+	post_transaction
 )
 from seed import *
-from ecc import SignatureError
+from ecc import (
+	SignatureError,
+	S256Point,
+)
 from helper import (
 	hash256,
 	hash160,
-	decode_base58
+	decode_base58, 
+	int_to_little,
+	little_to_int,
+	SIGHASH_ALL, 
+	SIGHASH_NONE,
+	SIGHASH_SINGLE, 
 )
 from script import (
 	p2pkh_script,
 	p2sh_script
 )
-from encrypt import (
-	encrypt,
-	decrypt
-)
+
 from tx import (
 	Tx,
 	TxIn, 
 	TxOut
 )
+from psbt import (
+	PSBTError, 
+	PSBT, 
+	PSBT_Role,
+	Creator, 
+	Updater, 
+	Signer, 
+	Combiner, 
+	Finalizer, 
+	Extractor
+)
 SEED_PREFIX = b"\x73\x65\x65\x64"
 XPRV_PREFIX = b"\x78\x70\x72\x76"
-
-
 
 class UTXO:
 	"""
@@ -67,6 +84,21 @@ class HDPubKey:
 		self.utxos = []
 		self.check_state()
 
+	def get_path(self):
+		''' returns path as concatenated bytes'''
+		levels = self.path.split("/")
+		print(levels)
+		path_bytes = b""
+		for lev in levels:
+			i = 0
+			if lev[-1] == "'":
+				i = SOFT_CAP
+				lev = lev[:-1]
+			i += int(lev)
+			path_bytes += int_to_little(i, 4)
+
+		return path_bytes
+
 	def __repr__(self):
 		label =  ", ".join(self.label)
 		return f"\"PubKey\": {self.pubkey.sec().hex()},\n\"FullKeyPath\": {self.path},\n\"Label\": {label},\n\"Count\": {self.txcount},\n\"Balance\": {self.balance}"
@@ -91,19 +123,21 @@ class HDPubKey:
 		"""
 		sets txcount and balance. returns balance
 		"""	
-		addr = self.pubkey.address(testnet=self.testnet)
-		tx_hist = get_address(addr).chain_stats
+		addr = self.address()
+		tx_hist = get_address(address=addr, testnet=self.testnet).chain_stats
 		self.txcount = tx_hist['tx_count']
 		self.balance = tx_hist['funded_txo_sum'] - tx_hist['spent_txo_sum']
 		return self.balance
 		
 	def get_utxos(self):
-		addr = self.pubkey.address(testnet=self.testnet)
-		return get_address_utxo(addr)
+		addr = self.address()
+		return get_address_utxo(address=addr, testnet=self.testnet)
+
+
 
 	def set_confirmed_utxos(self):
-		addr = self.pubkey.address(testnet=self.testnet)
-		utxos = get_address_utxo(addr)
+		addr = self.address()
+		utxos = get_address_utxo(address=addr, testnet=self.testnet)
 		for utxo in utxos:
 			if utxo.status.confirmed:
 				self.utxos.append(utxo)
@@ -201,6 +235,11 @@ class Wallet:
 			self.master_xpub = None
 		# Generate first GAP_LIMIT keys
 		
+	@classmethod
+	def new(cls, passphrase="", strength=128, testnet=False, lang="english"):
+		s = Seed.new(strength=128, lang=lang)
+		return cls(data=s, passphrase=passphrase, testnet=testnet)
+
 
 	def mnemonic(self):
 		if self.seed:
@@ -210,15 +249,20 @@ class Wallet:
 		if self.seed is None and self.master_xprv is not None:
 			raise TypeError("Wallet was created from ExtendedPrivateKey. Seed unknown.")
 
-	def master_fingerprint(self, xpub):
+
+	@staticmethod
+	def fingerprint(xpub):
 		return hash160(xpub.to_pub_key().sec())[:4]
+
+	def master_fingerprint(self):
+		return fingerprint(self.master_xpub)
 
 	def import_seed(self, seed, passphrase):
 		self.seed = seed
 		self.master_xprv = seed.derive_master_priv_key(passphrase=passphrase, testnet=self.testnet)
 		if self.master_xpub:
 			newXpub = self.derive_key((self.wallet_acct), priv=True).to_extended_pub_key()
-			if self.master_fingerprint(self.master_xpub) != self.master_fingerprint(newXpub):
+			if self.master_fingerprint() != self.fingerprint(newXpub):
 				raise ConfigurationError("Import Failed.")
 		else:
 			self.master_xpub = self.derive_key((self.wallet_acct), priv=True).to_extended_pub_key()
@@ -287,13 +331,11 @@ class Wallet:
 		hpk = HDPubKey(pubkey, path=fullpath, label=label, testnet=self.testnet)
 		hpk.check_state()
 		self.hdpubkeys.append(hpk)
-		return pubkey
+		return hpk
 
 	def new_address(self, label=[], external=True):
 		""" returns unused address and stores the associated pubkey in self.hdpubkeys """
-		if type(label) == str:
-			label = [label]
-		return self.new_pub_key(label=label, external=external).address(testnet=self.testnet)
+		return self.new_pub_key(label=label, external=external).pubkey.address(testnet=self.testnet)
 
 	def check_state(self):
 		""" calls check_state on each hdPubKey. Sets balance and updates txcount. """
@@ -310,23 +352,70 @@ class Wallet:
 		self.balance = sats
 		return sats
 
-	def get_priv_key(self, pubkey):
+	def get_priv_key(self, i):
 		""" gets corresponding privkey from a pubkey using pubkey.path """
 		if self.watch_only:
 			raise TypeError("Watch only wallet")
-		return self.derive_key(pubkey.path, priv=True).to_priv_key()
+		return self.derive_key(self.hdpubkeys[i].path, priv=True).to_priv_key()
+
+	def find_priv_key(self, sec):
+		for i, p in enumerate(self.hdpubkeys):
+			if p.pubkey.sec() == sec:
+				return self.get_priv_key(i)
 
 #----- TRANSACTION FUNCTIONS -----
 #
 #---------------------------------
-	def create_p2pkh(self, outputs, fee, locktime=0, priority="oldest", data=None):
-		"""
+	''' 
+	Flow: 
+	- create_p2pkh selects utxos and constructs unsigned TX
+		- if auto_sign: signs it and returns tx_bytes (ready for broadcast)
+		- else returns updated & serialized PSBT (ready for Signing)
 
+	- sign_psbt accepts serialized psbt and adds partial sigs
+	- finalize
+	- extract
+	- broadcast
+	
+	'''
+	
+	def _address_check(self, address):
+		""" 
+		MUST BE MADE BETTER. Very elementary.
+		- "1" addresses are of course p2pkh
+        - "3" addresses are p2sh but we don't know the redeemScript
+        - "bc1" 42-long are p2wpkh
+        - "bc1" 62-long are p2wsh 
+		"""
+		#P2PKH
+		if address[0] == "1":
+			return True
+		#P2SH
+		elif address[0] == "3":
+			return True
+		#P2WPKH or P2WSH
+		elif address[:3] == "bc1":
+			#P2WPKH
+			if len(address) == 42:
+				return True
+			#P2WSH
+			elif len(address) == 62:
+				return True
+			else:
+				return False
+		else: 
+			return False
+	
+	@staticmethod
+	def create_tx_out(amount, address, script_type=p2pkh_script):
+		return TxOut(amount, script_type(address))
+
+	def create_p2pkh(self, outputs, fee, locktime=0, priority="oldest", auto_sign=False, data=None):
+		"""
 		-outputs is a list of tuples (amount, address)
 		"""
 		amountOut = sum([o[0] for o in outputs])
 		pubkeys = self.select_utxos(amountNfee=(amountOut+fee), priority=priority, data=data)
-
 		amountIn = 0
 		tx_ins =[]
 		change_labels = []
@@ -335,28 +424,41 @@ class Wallet:
 			change_labels += pubkey.label
 			for utxo in pubkey.utxos:
 				#TX INS
-				tx_ins.append(TxIn(bytes.fromhex(utxo.tx_id), utxo.vout))
-				#stripped_pubkeys.append(pubkey.pubkey)
+				tx_ins.append((bytes.fromhex(utxo.tx_id), utxo.vout))
+
 			amountIn += pubkey.balance
 
+		#TX OUTS
+		tx_outs = outputs
 		#change output
 		change_amount = amountIn - fee - amountOut
-		change_addr = decode_base58(self.new_address(label=change_labels, external=False))
-		outputs.append((change_amount, change_addr))
-		#TX OUTS
-		tx_outs = []
-
-		for output in outputs:
-			tx_outs.append(Wallet.create_tx_out(output[0], output[1], script_type=p2pkh_script))
-
-		transaction = Tx(self.TX_VERSION, tx_ins, tx_outs, locktime, testnet=self.testnet)
+		change_pub_key = self.new_pub_key(label=change_labels, external=False)
+		change_addr = decode_base58(change_pub_key.pubkey.address(testnet=self.testnet))
+		
+		tx_outs.append((change_amount, change_addr))
+		
 		#Signing
-		for i, pubkey in enumerate(pubkeys):
-			if not transaction.sign_input(i, self.get_priv_key(pubkey)):
-				raise SignatureError(f"Signing Input {i} failed.")
-		if not transaction.verify():
-			raise TransactionError("Invalid Transaction")
-		return transaction
+		if auto_sign:
+			for output in outputs:
+				tx_outs.append(Wallet.create_tx_out(output[0], output[1], script_type=p2pkh_script))
+
+			tx_obj = Tx(self.TX_VERSION, tx_ins, tx_outs, locktime, testnet=self.testnet)
+			for i in range(len(pubkeys))):
+				if not tx_obj.sign_input(i, self.get_priv_key(i)):
+					raise SignatureError(f"Signing Input {i} failed.")
+			if not tx_obj.verify():
+				raise TransactionError("Invalid Transaction")
+			return tx_obj.serialize()
+
+		else:
+			psbt_cr = Creator(tx_ins, tx_outs, locktime=locktime).serialize()
+			psbt_up = Updater(psbt_cr)
+			psbt_up.add_output_pubkey(-1, change_pub_key.pubkey.sec(), self.master_fingerprint(), change_pub_key.get_path())
+			for i in range(len(pubkeys)):
+				psbt_up.add_input_pubkey(i, self.hdpubkeys[i].pubkey.sec(), self.master_fingerprint(), pubkey.get_path())
+				psbt_up.add_sighash_type(i, sighash=SIGHASH_ALL)
+				psbt_up.add_nonwitness_utxo(i, bytes.fromhex(get_transaction_hex(tx_ins[i].hex())))
+			return psbt_up.serialize()
 
 	def create_p2pkh_old(self, amount, address, fee, locktime=0, priority="oldest", data=None):
 		pubkeys = self.select_utxos(amountNfee=(amount+fee), priority=priority, data=data)
@@ -397,6 +499,9 @@ class Wallet:
 			- "smallest": uses fewest number of smallest utxos
 			- "below": uses ALL utxos below amount specified in data
 		"""
+		balance = self.get_balance()
+		if balance < amountNfee:
+			raise TransactionError("Insufficient Funds for this transaction.")		
 		pAmount = 0
 		pubkeys = []
 		if priority == "oldest":
@@ -404,14 +509,15 @@ class Wallet:
 				#TODO if "NoSpend" not in pubkey.label:
 				if pubkey.balance > 0:
 					pubkey.set_confirmed_utxos()
-					pubkeys.append(pubkey)
+					for _ in pubkey.utxos:
+						pubkeys.append(pubkey)
 					pAmount += pubkey.balance
 					if pAmount >= amountNfee:
 						break
 
 		elif priority == "biggest":
 			balances = []
-			for _ in range(len(self.hdpubkeys))
+			for _ in range(len(self.hdpubkeys)):
 				nextKey = max(self.hdpubkeys, key=(lambda x: x.balance))
 				#TODO if "NoSpend" not in pubkey.label:
 				pubkeys.append(nextKey)
@@ -421,7 +527,7 @@ class Wallet:
 			
 		elif priority == "smallest":
 			balances = []
-			for _ in range(len(self.hdpubkeys))
+			for _ in range(len(self.hdpubkeys)):
 				nextKey = min(self.hdpubkeys, key=(lambda x: x.balance))
 				#TODO if "NoSpend" not in pubkey.label:
 				pubkeys.append(nextKey)
@@ -435,49 +541,68 @@ class Wallet:
 		if pAmount < amountNfee:
 			raise TransactionError("Insufficient Funds for this transaction.")		
 		return pubkeys
+	
+	def sign_psbt(self, serialized_psbt):
+		""" 
+		Sign PSBT. Currently assumes inputs are 
+		ordered the same in unsigned tx and psbt. 
+		For now, only SIGHASH_ALL is approved. 
+		- If a non-witness UTXO is provided, its hash must match the hash specified in the prevout
+		- TODO If a witness UTXO is provided, no non-witness signature may be created
+		- TODO If a redeemScript is provided, the scriptPubKey must be for that redeemScript
+		- TODO If a witnessScript is provided, the scriptPubKey or the redeemScript must be for that witnessScript
+		- TODO If a sighash type is provided, the signer must check that the sighash is acceptable. If unacceptable, they must fail.
+		- If a sighash type is not provided, the signer signs using SIGHASH_ALL
+		"""
+		psbt_si = Signer(serialized_psbt)
+		tx_obj = Tx.parse(psbt_si.get_unsigned_tx())
+		for i in range(len(psbt_si.psbt.maps["inputs"])):
+			curr_input = psbt_si.psbt.maps["inputs"][i]
+			# check prev_tx_id
+			if IN_NON_WITNESS_UTXO in curr_input:
+				psbt_tx_id = hash256(curr_input[IN_NON_WITNESS_UTXO])[::-1]
+				gutx_tx_id = tx_obj.tx_ins[i].prev_tx
+				if psbt_tx_id != gutx_tx_id:
+					raise PSBTError(f"UTXO {i} and Unsigned TX input {i} have different prev_tx_id: {psbt_tx_id} vs {gutx_tx_id}")
+			elif IN_WITNESS_UTXO in curr_input:
+				raise NotImplementedError("SegWit Soon(tm)")
+			# Look for redeemScripts
+			if IN_REDEEM_SCRIPT in curr_input:
+				raise NotImplementedError("Redeem Scripts not signable Yet. Unknown how to find ScriptPubKey")
+			# read sighash
+			sighash_type = psbt_si.get_sighash_type(i)
+			if sighash_type is None:
+				sighash_type = SIGHASH_ALL
+			elif sighash_type != SIGHASH_ALL:
+				raise NotImplementedError("Other sighash types not yet supported.")
+			# sign
+			pubkey = psbt_si.get_input_pubkey(i)
+			privkey = psbt_si.find_priv_key(pubkey)
+			if not tx_obj.sign_input(i, privkey, sighash_type=sighash_type):
+				raise SignatureError(f"Signing of input {i} failed.")
+			sig = tx_obj.tx_ins[i].script_sig.cmds[0]
+			psbt_si.add_partial_sig(sig, pubkey, i)
+		return psbt_si.serialize()
 
 	@staticmethod
-	def create_tx_out(amount, address, script_type=p2pkh_script):
-		return TxOut(amount, script_type(address))
+	def finalize(serialized_psbt):
+		return Finalizer(serialized_psbt)
 
-	# def sign_psbt(self, psbt, pubkeys):
-	# 	""" Sign PSBT """
-	# 	for i in len(tx.tx_ins):
-	# 		priv = self.get_priv_key(pubkeys[i])
-	# 		if not tx.sign_input(i, priv): 
-	# 			raise ValueError("Input Signing Failed")
-	# 	return tx
+	@staticmethod
+	def extract(serialize_psbt):
+		return Extractor(serialized_psbt)
 
-	def _address_check(self, address):
-		""" 
-		MUST BE MADE BETTER. Very elementary.
-		# - "1" addresses are of course p2pkh
-        # - "3" addresses are p2sh but we don't know the redeemScript
-        # - "bc1" 42-long are p2wpkh
-        # - "bc1" 62-long are p2wsh 
-		"""
-		#P2PKH
-		if address[0] == "1":
-			return True
-		#P2SH
-		elif address[0] == "3":
-			return True
-		#P2WPKH or P2WSH
-		elif address[:3] == "bc1":
-			#P2WPKH
-			if len(address) == 42:
-				return True
-			#P2WSH
-			if len(address) == 62:
-				return True
-		else: 
-			return False
+	def quick_sign(self, serialized_psbt):
+		extract(finalize(sign_psbt(serialized_psbt)))
 		
-	def broadcast(self, tx): 
-		if tx.verify():
-			raise NotImplementedError("coming soon")
+
+	@staticmethod
+	def broadcast(tx_bytes):
+		tx_obj = Tx.parse(BytesIO(tx_bytes))
+		if tx_obj.verify():
+			post_transaction(tx_obj.serialize().hex())
 		else:
-			raise TransactionError("Invalid Transaction")
+			raise TransactionError("Invalid Transaction.")
 
 	def create_p2sh(self, address, amount, fee, priority="oldest", data=None):
 		raise NotImplementedError("coming soon")
@@ -490,7 +615,7 @@ class Wallet:
 		perm = "watch" if self.watch_only else "total"
 		netw = "test" if self.testnet else "main"
 		d = {
-			"MASTER_FINGERPRINT": self.master_fingerprint(self.master_xpub).hex(),
+			"FINGERPRINT": self.fingerprint(self.master_xpub).hex(),
 			"ACCT_XPUB": self.master_xpub.__repr__(),
 			"ACCT_PATH": self.wallet_acct,
 			"NETWORK": netw,
@@ -574,6 +699,10 @@ class Wallet:
 
 	def write_secret(self, filename=None, password=None):
 		from os import remove
+		from encrypt import (
+			encrypt,
+			decrypt
+		)
 		if filename is None:
 			filename = f"{self.name}.dat"
 		if self.seed is not None:
@@ -597,6 +726,10 @@ class Wallet:
 			remove(f"{filename}.dat")
 
 	def read_secret(self, filename, password=None):
+		from encrypt import (
+			encrypt,
+			decrypt
+		)
 		with open(f"{filename}.dat", "rb") as fp:
 			fOut = fp.read()
 		secret = decrypt(fOut, password)
@@ -646,8 +779,8 @@ if __name__ == "__main__":
 	# print(w.new_address(label="faucet", external=True))
 
 
-	w2 = Wallet(passphrase="password1", testnet=True, watch_only=False)
-	w2.read_secret(filename="test", password="password1")
+	#w2 = Wallet(passphrase="password1", testnet=True, watch_only=False)
+	#w2.read_secret(filename="test", password="password1")
 	# for i in range(7):
 	# 	w2.new_pub_key(external=True)
 	# for pk in w2.hdpubkeys:
@@ -658,11 +791,14 @@ if __name__ == "__main__":
 
 	# tx = w2.create_p2pkh(amount, addr, fee)
 	# print(tx.serialize().hex())
+	w = Wallet.new()
+	print(w.hdpubkeys[0].path)
+	b = w.hdpubkeys[0].get_path()
+	path = []
+	for i in range(4):
+		path.append(little_to_int(b[i*4:(i+1)*4]))
+	print(path)
 
-	for i in range(5):
-		w2.new_pub_key(external=False)
-		w2.new_pub_key(external=True)
-	w2.write_json(filename="test")
 
 
 

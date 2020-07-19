@@ -8,13 +8,15 @@ from ecc import PrivateKey
 from helper import (
     encode_varint,
     hash256,
-    int_to_little_endian,
-    little_endian_to_int,
+    int_to_little,
+    little_to_int,
     read_varint,
     SIGHASH_ALL,
 )
 from script import Script
 
+class TransactionError(Exception):
+    pass
 
 class TxFetcher:
     cache = {}
@@ -39,7 +41,7 @@ class TxFetcher:
             if raw[4] == 0:
                 raw = raw[:4] + raw[6:]
                 tx = Tx.parse(BytesIO(raw), testnet=testnet)
-                tx.locktime = little_endian_to_int(raw[-4:])
+                tx.locktime = little_to_int(raw[-4:])
             else:
                 tx = Tx.parse(BytesIO(raw), testnet=testnet)
             if tx.id() != tx_id:
@@ -56,7 +58,7 @@ class TxFetcher:
             if raw[4] == 0:
                 raw = raw[:4] + raw[6:]
                 tx = Tx.parse(BytesIO(raw))
-                tx.locktime = little_endian_to_int(raw[-4:])
+                tx.locktime = little_to_int(raw[-4:])
             else:
                 tx = Tx.parse(BytesIO(raw))
             cls.cache[k] = tx
@@ -67,7 +69,6 @@ class TxFetcher:
             to_dump = {k: tx.serialize().hex() for k, tx in cls.cache.items()}
             s = json.dumps(to_dump, sort_keys=True, indent=4)
             f.write(s)
-
 
 class Tx:
 
@@ -108,7 +109,7 @@ class Tx:
         '''
         # s.read(n) will return n bytes
         # version is an integer in 4 bytes, little-endian
-        version = little_endian_to_int(s.read(4))
+        version = little_to_int(s.read(4))
         # num_inputs is a varint, use read_varint(s)
         num_inputs = read_varint(s)
         # parse num_inputs number of TxIns
@@ -122,14 +123,14 @@ class Tx:
         for _ in range(num_outputs):
             outputs.append(TxOut.parse(s))
         # locktime is an integer in 4 bytes, little-endian
-        locktime = little_endian_to_int(s.read(4))
+        locktime = little_to_int(s.read(4))
         # return an instance of the class (see __init__ for args)
         return cls(version, inputs, outputs, locktime, testnet=testnet)
 
     def serialize(self):
         '''Returns the byte serialization of the transaction'''
         # serialize version (4 bytes, little endian)
-        result = int_to_little_endian(self.version, 4)
+        result = int_to_little(self.version, 4)
         # encode_varint on the number of inputs
         result += encode_varint(len(self.tx_ins))
         # iterate inputs
@@ -143,7 +144,7 @@ class Tx:
             # serialize each output
             result += tx_out.serialize()
         # serialize locktime (4 bytes, little endian)
-        result += int_to_little_endian(self.locktime, 4)
+        result += int_to_little(self.locktime, 4)
         return result
 
     def fee(self):
@@ -159,18 +160,18 @@ class Tx:
         # fee is input sum - output sum
         return input_sum - output_sum
 
-    def sig_hash(self, input_index, redeem_script=None):
+    def sig_hash(self, idx, sighash_type=SIGHASH_ALL, redeem_script=None):
         '''Returns the integer representation of the hash that needs to get
-        signed for index input_index'''
+        signed for index idx'''
         # start the serialization with version
-        # use int_to_little_endian in 4 bytes
-        s = int_to_little_endian(self.version, 4)
+        # use int_to_little in 4 bytes
+        s = int_to_little(self.version, 4)
         # add how many inputs there are using encode_varint
         s += encode_varint(len(self.tx_ins))
         # loop through each input using enumerate, so we have the input index
         for i, tx_in in enumerate(self.tx_ins):
             # if the input index is the one we're signing
-            if i == input_index:
+            if i == idx:
                 # if the RedeemScript was passed in, that's the ScriptSig
                 if redeem_script:
                     script_sig = redeem_script
@@ -192,19 +193,19 @@ class Tx:
         # add the serialization of each output
         for tx_out in self.tx_outs:
             s += tx_out.serialize()
-        # add the locktime using int_to_little_endian in 4 bytes
-        s += int_to_little_endian(self.locktime, 4)
-        # add SIGHASH_ALL using int_to_little_endian in 4 bytes
-        s += int_to_little_endian(SIGHASH_ALL, 4)
+        # add the locktime using int_to_little in 4 bytes
+        s += int_to_little(self.locktime, 4)
+        # add SIGHASH_ALL using int_to_little in 4 bytes
+        s += int_to_little(sighash_type, 4)
         # hash256 the serialization
         h256 = hash256(s)
         # convert the result to an integer using int.from_bytes(x, 'big')
         return int.from_bytes(h256, 'big')
 
-    def verify_input(self, input_index):
+    def verify_input(self, idx):
         '''Returns whether the input has a valid signature'''
         # get the relevant input
-        tx_in = self.tx_ins[input_index]
+        tx_in = self.tx_ins[idx]
         # grab the previous ScriptPubKey
         script_pubkey = tx_in.script_pubkey(testnet=self.testnet)
         # check to see if the ScriptPubkey is a p2sh using
@@ -221,7 +222,7 @@ class Tx:
             redeem_script = None
         # get the signature hash (z)
         # pass the RedeemScript to the sig_hash method
-        z = self.sig_hash(input_index, redeem_script)
+        z = self.sig_hash(idx, redeem_script)
         # combine the current ScriptSig and the previous ScriptPubKey
         combined = tx_in.script_sig + script_pubkey
         # evaluate the combined script
@@ -238,22 +239,22 @@ class Tx:
                 return False
         return True
 
-    def sign_input(self, input_index, private_key):
+    def sign_input(self, idx, private_key, sighash_type=SIGHASH_ALL):
         '''Signs the input using the private key'''
         # get the signature hash (z)
-        z = self.sig_hash(input_index)
+        z = self.sig_hash(idx, sighash_type=sighash_type)
         # get der signature of z from private key
         der = private_key.sign(z).der()
-        # append the SIGHASH_ALL to der (use SIGHASH_ALL.to_bytes(1, 'big'))
-        sig = der + SIGHASH_ALL.to_bytes(1, 'big')
+        # append the sighash_type to der (use sighash_type.to_bytes(1, 'big'))
+        sig = der + sighash_type.to_bytes(1, 'big')
         # calculate the sec
         sec = private_key.point.sec()
         # initialize a new script with [sig, sec] as the cmds
         script_sig = Script([sig, sec])
         # change input's script_sig to new script
-        self.tx_ins[input_index].script_sig = script_sig
+        self.tx_ins[idx].script_sig = script_sig
         # return whether sig is valid using self.verify_input
-        return self.verify_input(input_index)
+        return self.verify_input(idx)
 
     def is_coinbase(self):
         '''Returns whether this transaction is a coinbase transaction or not'''
@@ -271,7 +272,6 @@ class Tx:
         # grab the first cmd
         # convert the cmd from little endian to int
         raise NotImplementedError
-
 
 class TxIn:
 
@@ -298,11 +298,11 @@ class TxIn:
         # prev_tx is 32 bytes, little endian
         prev_tx = s.read(32)[::-1]
         # prev_index is an integer in 4 bytes, little endian
-        prev_index = little_endian_to_int(s.read(4))
+        prev_index = little_to_int(s.read(4))
         # use Script.parse to get the ScriptSig
         script_sig = Script.parse(s)
         # sequence is an integer in 4 bytes, little-endian
-        sequence = little_endian_to_int(s.read(4))
+        sequence = little_to_int(s.read(4))
         # return an instance of the class (see __init__ for args)
         return cls(prev_tx, prev_index, script_sig, sequence)
 
@@ -311,11 +311,11 @@ class TxIn:
         # serialize prev_tx, little endian
         result = self.prev_tx[::-1]
         # serialize prev_index, 4 bytes, little endian
-        result += int_to_little_endian(self.prev_index, 4)
+        result += int_to_little(self.prev_index, 4)
         # serialize the script_sig
         result += self.script_sig.serialize()
         # serialize sequence, 4 bytes, little endian
-        result += int_to_little_endian(self.sequence, 4)
+        result += int_to_little(self.sequence, 4)
         return result
 
     def fetch_tx(self, testnet=False):
@@ -341,9 +341,11 @@ class TxIn:
         # return the script_pubkey property
         return tx.tx_outs[self.prev_index].script_pubkey
 
+    def prev_txid(self):
+        return self.prev_tx[::-1]
 
 class TxOut:
-
+    
     def __init__(self, amount, script_pubkey):
         self.amount = amount
         self.script_pubkey = script_pubkey
@@ -357,7 +359,7 @@ class TxOut:
         return a TxOut object
         '''
         # amount is an integer in 8 bytes, little endian
-        amount = little_endian_to_int(s.read(8))
+        amount = little_to_int(s.read(8))
         # use Script.parse to get the ScriptPubKey
         script_pubkey = Script.parse(s)
         # return an instance of the class (see __init__ for args)
@@ -366,7 +368,8 @@ class TxOut:
     def serialize(self):
         '''Returns the byte serialization of the transaction output'''
         # serialize amount, 8 bytes, little endian
-        result = int_to_little_endian(self.amount, 8)
+        result = int_to_little(self.amount, 8)
         # serialize the script_pubkey
         result += self.script_pubkey.serialize()
         return result
+

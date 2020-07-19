@@ -7,13 +7,18 @@
 			
 -Wallet.py
 	-change keys label
-	-verify fil
+	-verify file
 	-addr checks
-	-psbt
+	-psbt integration
+	-Seed Passphrase better integrated
+
 	-later build own api and bloom filter
 	-maybe store pubkey as bytes?
 -Seed
 	-maybe store entropy as bytes?
+
+-PSBT:
+	-proper way of matching inputs in tx and psbt
 
 
 -All
