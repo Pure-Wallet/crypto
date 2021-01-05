@@ -68,7 +68,7 @@ def get_transaction_status(tx_id, testnet=False):
     return TransactionStatus(response, testnet)
 
 
-def get_transaction_hex(tx_id,testnet=False):
+def get_transaction_hex(tx_id, testnet=False):
     """
     Request the raw transaction in hex
     :param str tx_id: transaction ID
@@ -132,7 +132,6 @@ def get_address(address, testnet=False):
     """
     resource = f'address/{address}'
     response = call_api(resource, testnet)
-    #print(Address(response, testnet))
     return Address(response, testnet)
 
 def get_address_transactions(address, testnet=False):
@@ -375,8 +374,13 @@ class UTXO:
     def __init__(self, utxo, testnet=False):
         self.tx_id = utxo['txid']
         self.vout = utxo['vout']
-        self.status = TransactionStatus(utxo['status'])
-        self.value = utxo['value']
+        if utxo['status']['confirmed']:
+            self.status = "confirmed"
+            self.block_height = utxo['status']['block_height']
+        else:
+            self.status = "unconfirmed"
+            self.block_height = 0
+        self.amount = utxo['value']
         self.testnet = testnet
     def get_tx(self):
         return get_transaction(self.tx_id, self.testnet)
@@ -437,7 +441,7 @@ class MempoolRecent:
         self.tx_id = info['txid']
         self.fee = info['fee']
         self.vsize = info['vsize']
-        self.value = info['value']
+        self.amount = info['value']
 
 
 class FeeEstimates:
@@ -454,7 +458,9 @@ class FeeEstimates:
         self.tenzeroeight_blocks = data['1008']
 
 if __name__ == "__main__":
-    # hx = get_transaction_hex("2f4262a2c2111799d0edf8591bb30b0cefe06cfb03a364a2dad37c18b4cd7ef4", testnet=False)
-    # print(hx)
-    reply = post_transaction("02000000014854f3a834d7c48653fbf71a52370903fe497918c8258bf4065a788808c26e11090000006a47304402207e0eeb6b059c0298059b942efe33522279ec857ccda1fd0a0f7b86c8a54b1b5d02200cb9ef4309c7306f71e3a92303e982102a8196947158d7aba60b3f218ebf4865012102853e01522ba5269df6fa210bb87ca14b2e630110ca56f05d0814461b5d5eeaaafeffffff02603270240100000017a91469f375f799932a576c56301e0d540a95c5236ae1874c28c317010000001976a9140b7adc14d6857c9d3bb25b3059b86a583beb41a588acb4be0900", testnet=False)
-    print(reply)
+    hx = get_transaction_hex("e634161490be6075f8024f4803162d3b102bbb170a8b7cdc3cd9bee6746a8ab0", testnet=False)
+    print(hx)
+    #hxb = bytes.fromhex(hx)
+    #print(hxb)
+    # reply = post_transaction("02000000014854f3a834d7c48653fbf71a52370903fe497918c8258bf4065a788808c26e11090000006a47304402207e0eeb6b059c0298059b942efe33522279ec857ccda1fd0a0f7b86c8a54b1b5d02200cb9ef4309c7306f71e3a92303e982102a8196947158d7aba60b3f218ebf4865012102853e01522ba5269df6fa210bb87ca14b2e630110ca56f05d0814461b5d5eeaaafeffffff02603270240100000017a91469f375f799932a576c56301e0d540a95c5236ae1874c28c317010000001976a9140b7adc14d6857c9d3bb25b3059b86a583beb41a588acb4be0900", testnet=False)
+    # print(reply)

@@ -4,13 +4,20 @@ from blockstream.blockexplorer import (
 	get_address,
 	get_address_utxo,
 	get_transaction_hex,
+	get_transaction_status,
 	post_transaction
 )
 from seed import *
+from psbt import *
 from ecc import (
 	SignatureError,
 	S256Point,
 )
+from address import (
+	Address,
+	AddressError
+)
+
 from helper import (
 	hash256,
 	hash160,
@@ -23,27 +30,46 @@ from helper import (
 )
 from script import (
 	p2pkh_script,
-	p2sh_script
+	p2sh_script,
+	p2wpkh_script,
+	p2wsh_script,
+	ScriptError
 )
-
 from tx import (
 	Tx,
 	TxIn, 
-	TxOut
+	TxOut,
+	TransactionError
 )
-from psbt import (
-	PSBTError, 
-	PSBT, 
-	PSBT_Role,
-	Creator, 
-	Updater, 
-	Signer, 
-	Combiner, 
-	Finalizer, 
-	Extractor
+from bech32 import (
+	bech32_address_decode,
+	h160_to_p2wpkh,
+	h256_to_p2wsh,
+	Bech32Error
 )
+from sql.sqlhandler import (
+	WalletDB,
+	DatabaseError
+)
+
 SEED_PREFIX = b"\x73\x65\x65\x64"
 XPRV_PREFIX = b"\x78\x70\x72\x76"
+
+XPUB_PFX = b"\x04\x88\xb2\x1e"
+XPRV_PFX = b"\x04\x88\xad\xe4"
+TPUB_PFX = b"\x04\x35\x87\xcf"
+TPRV_PFX = b"\x04\x35\x83\x94"
+
+YPUB_PFX = b"\x04\x9d\x7c\xb2"
+YPRV_PFX = b"\x04\x9d\x78\x78"
+UPUB_PFX = b"\x04\x4a\x52\x62"
+UPRV_PFX = b"\x04\x4a\x4e\x28"
+
+ZPRV_PFX = b"\x04\xb2\x43\x0c"
+ZPUB_PFX = b"\x04\xb2\x47\x46"
+VPRV_PFX = b"\x04\x5f\x18\xbc"
+VPUB_PFX = b"\x04\x5f\x1c\xf6"
+
 
 class UTXO:
 	"""
@@ -53,41 +79,53 @@ class UTXO:
 		-index (int)
 		-value (int) in sats
 	"""
-	def __init__(self, txid, idx, value):
+	def __init__(self, txid, vout, amount, script_id, block_height=0, status="unconfirmed"):
 		self.txid = txid
-		self.idx = idx
-		self.value = value
+		self.vout = vout
+		self.amount  = amount
+		self.block_height = block_height
+		self.status = status
+		self.script_id = script_id
 
 	def to_json(self):
 		return {
 			"tx_id": self.txid,
-			"idx": self.idx,
-			"value": self.value
+			"vout": self.vout,
+			"amount": self.amount,
+			"block_height": self.block_height,
+			"status": self.status,
+			"script_id": self.script_id
 		}
+	def __iter__(self):
+		yield self.txid
+		yield self.vout
+		yield self.amount
+		yield self.block_height 
+		yield self.status
+		yield self.script_id
 
-class HDPubKey:
-	"""
-	class for holding a pubkey (S256Point object) and metadata,
-	including: 
-	-Count (UTXO count)
-	-Full Path
-	-Label
-	Inspiration from Wasabi Wallet.
-	"""
-	def __init__(self, pubkey, path, label=[], testnet=False):
-		self.pubkey = pubkey
-		self.path = path
+	def check_status(self, testnet=False):
+		status = get_transaction_status(self.txid, testnet=testnet)
+		self.block_height = status.block_height
+		self.status = status.confirmed
+
+class HDScriptPubKey:
+	def __init__(self, script_pubkey, script_name, deriv_path, label=[], script_id=None, amount=None):
+		self.script_pubkey = script_pubkey
+		self.script_name = script_name
+		self.path = deriv_path
 		self.label = label
-		self.testnet = testnet
-		self.txcount = 0
-		self.balance = 0
-		self.utxos = []
-		self.check_state()
+		self.script_id = script_id
+		self.amount = amount
 
-	def get_path(self):
+	def __iter__(self):
+		yield self.script_pubkey.hex()
+		yield self.script_name
+		yield self.path
+
+	def get_path_bytes(self):
 		''' returns path as concatenated bytes'''
 		levels = self.path.split("/")
-		print(levels)
 		path_bytes = b""
 		for lev in levels:
 			i = 0
@@ -96,110 +134,72 @@ class HDPubKey:
 				lev = lev[:-1]
 			i += int(lev)
 			path_bytes += int_to_little(i, 4)
-
 		return path_bytes
 
-	def __repr__(self):
-		label =  ", ".join(self.label)
-		return f"\"PubKey\": {self.pubkey.sec().hex()},\n\"FullKeyPath\": {self.path},\n\"Label\": {label},\n\"Count\": {self.txcount},\n\"Balance\": {self.balance}"
-		
-	def to_json(self):
-		# utxo_list = []
-		# for utxo in self.utxos:
-		# 	utxo_list.append(utxo.to_json())
-		return {
-			"PubKey": self.pubkey.sec().hex(),
-			"FullKeyPath": self.path,
-			"Label": self.label
-		}
-	
-	@classmethod
-	def parse(cls, data):
-		sec = bytes(bytearray.fromhex(data["PubKey"]))
-		pubkey = S256Point.parse(sec)
-		return HDPubKey(pubkey, data["FullKeyPath"], data["Label"])
-
-	def check_state(self):
-		"""
-		sets txcount and balance. returns balance
-		"""	
-		addr = self.address()
-		tx_hist = get_address(address=addr, testnet=self.testnet).chain_stats
-		self.txcount = tx_hist['tx_count']
-		self.balance = tx_hist['funded_txo_sum'] - tx_hist['spent_txo_sum']
-		return self.balance
-		
-	def get_utxos(self):
-		addr = self.address()
-		return get_address_utxo(address=addr, testnet=self.testnet)
-
-
-
-	def set_confirmed_utxos(self):
-		addr = self.address()
-		utxos = get_address_utxo(address=addr, testnet=self.testnet)
-		for utxo in utxos:
-			if utxo.status.confirmed:
-				self.utxos.append(utxo)
-		#return len(self.utxos)
-
-	def is_used(self):
-		return self.txcount > 0
-
-	def empty(self):
-		return self.balance == 0
-
-	def set_label(self, label):
-		self.label.append(label)
-
-	def address(self):
-		return self.pubkey.address(testnet=self.testnet)
+	def address(self, testnet=False):
+		return self.script_pubkey.to_address(testnet=testnet)
 
 class Wallet:
-	DEFAULT_GAP_LIMIT = 5
-	DEFAULT_NAME = "Wallet0"
-	BASE_PATH = "76'/0'/"
-	DUST_LIMIT = 5000
-	TX_VERSION = 1
-	
 	"""
 	A class for storing a single Seed or ExtendedKey in order to manage UTXOs, craft transactions, and more.
 	Contains a wallet account (2 layers of depth) and an external (0) and internal (1) account chain, as 
 	specified in BIP0032
 	"""
-	def __init__(self, name=DEFAULT_NAME, passphrase="", testnet=False, data=None, watch_only=False):
+	DEFAULT_GAP_LIMIT = 10
+	DEFAULT_NAME = "Wallet0"
+	DUST_LIMIT = 5000000
+	ACCOUNT="0'/"
+	TX_VERSION = 1
+	DEFAULT_SCRIPT_NAME = "p2pkh"
+	
+	
+
+	def __init__(self, name=DEFAULT_NAME, passphrase="", testnet=False, data=None, watch_only=False, script_type=DEFAULT_SCRIPT_NAME):
 		self.name = name
 		self.passphrase = passphrase
 		self.testnet = testnet
-		self.ext_count = 0
-		self.int_count = 0
 		self.watch_only = watch_only
-		
-		self.wallet_acct = self.BASE_PATH
+		self.walletdb = WalletDB(f'{name}.db')
+		# set later
+		self.script_name = None
+		self.purpose_path = None
+		self.script_func = None
+		self.pub_pfx = None
+		self.prv_pfx = None
+		self.wallet_acct = None
+
 		# this standard is defined in BIP0032
 		self.ext_chain = 0 # used as 3th layer of derivation path before 4th layer = keys
 		self.int_chain = 1 # used as internal chain, for change addr etc.
 		self.balance = 0
+		self.ext_count = 0
+		self.int_count = 0
 		self.gap_limit = self.DEFAULT_GAP_LIMIT
-		
-		self.hdpubkeys = []
 		# Load data into wallet, either Seed, Xpub, Xpriv. create necessary keys
 		if data is not None:
 			#import from seed, xpub, xprv object, or from string xpub or xprv 
 			if type(data) == Seed:
 				self.seed = data
-				self.master_xprv = data.derive_master_priv_key(passphrase=passphrase, testnet=testnet)
-				self.master_xpub = self.derive_key((self.wallet_acct), priv=True).to_extended_pub_key()
-				#self.ext_xpub = self.derive_key((self.wallet_acct + str(self.ext_chain)), priv=True).to_extended_pub_key()
-				#self.int_xpub = self.derive_key((self.wallet_acct + str(self.int_chain)), priv=True).to_extended_pub_key()
+				self._set_script_info(script_type)
+				self.wallet_acct = self.determine_path()
+				self.master_xprv = data.derive_master_priv_key(passphrase=passphrase, _pfx=self.prv_pfx)
+				self.master_xpub = self.master_xprv.to_extended_pub_key()
+				self.acct_xprv = self.derive_key(self.wallet_acct, priv=True, absolute=True)
+				self.acct_xpub = self.acct_xprv.to_extended_pub_key()
 			elif type(data) == ExtendedPrivateKey:
 				self.master_xprv = data
-				self.master_xpub = self.derive_key((self.wallet_acct), priv=True).to_extended_pub_key()
-				#self.ext_xpub = self.derive_key((self.wallet_acct + str(self.ext_chain)), priv=True).to_extended_pub_key()
-				#self.int_xpub = self.derive_key((self.wallet_acct + str(self.int_chain)), priv=True).to_extended_pub_key()
+				t = self.master_xprv.__repr__()[0]
+				self._set_script_info(self._script_type_from_pfx(t))
+				self.wallet_acct = self.determine_path()
+				self.master_xpub = self.master_xprv.to_extended_pub_key()
+				self.acct_xprv = self.derive_key(self.wallet_acct, priv=True, absolute=True)
+				self.acct_xpub = self.acct_xprv.to_extended_pub_key()
 				self.seed = None
 			elif type(data) == ExtendedPublicKey: # not fully thought-out. Fix Later
-				self.master_xpub = data
+				self.acct_xpub = data
+				t = self.acct_xpub.__repr__()[0]
+				self._set_script_info(self._script_type_from_pfx(t))
+				self.wallet_acct = self.determine_path()	
 				self.master_xprv = None
 				self.seed = None
 
@@ -207,39 +207,99 @@ class Wallet:
 				if data[:4] == "xprv":
 					try:
 						self.master_xprv = ExtendedPrivateKey.parse(data)
-						self.master_xpub = self.derive_key((self.wallet_acct), priv=True).to_extended_pub_key()
-						#self.ext_xpub = self.derive_key(self.wallet_acct + str(self.ext_chain), priv=True).to_extended_pub_key()
-						#self.int_xpub = self.derive_key((self.wallet_acct + str(self.int_chain)), priv=True).to_extended_pub_key()
+						self.acct_xpub = self.derive_key(self.wallet_acct, priv=True).to_extended_pub_key()
 						self.seed = None
 					
 					except ConfigurationError:
 						raise ConfigurationError("Invalid master XPRIV key.")
 				elif data[:4] == "xpub": # not useful. Think through
 					try:
-						self.master_xpub = ExtendedPublicKey.parse(data)
+						self.acct_xpub = ExtendedPublicKey.parse(data)
 						self.master_xprv = None
 					except ConfigurationError:
 						raise ConfigurationError("Invalid master XPUB key.")
 				else:
 					raise ConfigurationError("Invalid import format")
-		
-			if not self.watch_only:
-				
-				for _ in range(self.gap_limit):
-					self.new_pub_key()
-				# Scan them all
-				self.check_state()
 		else:
 			self.seed = None
 			self.master_xprv = None
-			self.master_xpub = None
-		# Generate first GAP_LIMIT keys
-		
-	@classmethod
-	def new(cls, passphrase="", strength=128, testnet=False, lang="english"):
-		s = Seed.new(strength=128, lang=lang)
-		return cls(data=s, passphrase=passphrase, testnet=testnet)
+			self.acct_xpub = None
 
+	def _set_script_info(self, script_type):
+		PURPOSES = {
+			"p2pkh": {
+				"mpfx": "x",
+				"tpfx": "t",
+				"path": "44'/", # BIP 44
+				"func": self.pubkey_to_p2pkh_script,
+				"mprv": b"\x04\x88\xad\xe4", # xprv
+				"mpub": b"\x04\x88\xb2\x1e",
+				"tprv": b"\x04\x35\x83\x94",
+				"tpub": b"\x04\x35\x87\xcf"
+			},
+			"p2sh-p2wpkh":  { # BIP 49
+				"mpfx": "y",
+				"tpfx": "u",
+				"path": "49'/",
+				"func": self.pubkey_to_p2sh_p2wpkh_script,
+				"mprv": b"\x04\x9d\x78\x78", # yprv
+				"mpub": b"\x04\x9d\x7c\xb2", # ypub
+				"tprv": b"\x04\x4a\x4e\x28",
+				"tpub": b"\x04\x4a\x52\x62", 
+
+			},
+			"p2wpkh": {
+				"mpfx": "z",
+				"tpfx": "v",
+				"path": "84'/", # BIP 84
+				"func": self.pubkey_to_p2wpkh_script,
+				"mprv": b"\x04\xb2\x43\x0c", # zprv
+				"mpub": b"\x04\xb2\x47\x46",
+				"tprv": b"\x04\x5f\x18\xbc",
+				"tpub": b"\x04\x5f\x1c\xf6"
+			}
+		}
+		try:
+			self.script_name = script_type
+			self.purpose_path = PURPOSES[script_type]["path"]
+			self.script_func = PURPOSES[script_type]["func"]
+			if self.testnet:
+				pfx = "t"
+			else:
+				pfx = "m"
+			self.pub_pfx = PURPOSES[script_type][pfx + "pub"]
+			self.prv_pfx = PURPOSES[script_type][pfx + "prv"]
+		except (KeyError, ValueError):
+			self._set_script_info(self.DEFAULT_SCRIPT_NAME)
+
+	def _script_type_from_pfx(self, pfx):
+		if pfx in ["t", "u", "v"]:
+			self.testnet = True
+		elif pfx in ["x", "y", "z"]:
+			self.testnet = False
+		else:
+			raise RuntimeError("Invalid prefix")
+		if pfx in ["x", "t"]:
+			return "p2pkh"
+		elif pfx in ["y", "u"]:
+			return "p2sh-p2wpkh"
+		elif pfx in ["z", "v"]:
+			return "p2wpkh"
+		
+
+	@classmethod
+	def new(cls, name=DEFAULT_NAME, passphrase="", strength=128, testnet=False, lang="english", script_type=DEFAULT_SCRIPT_NAME):
+		s = Seed.new(strength=strength, lang=lang)
+		return cls(name=name, data=s, passphrase=passphrase, testnet=testnet, script_type=script_type)
+
+	def determine_path(self):
+		path = self.purpose_path
+		if self.testnet:
+			path += "1'/"
+		else:
+			path += "0'/"
+		path += self.ACCOUNT
+		return path
 
 	def mnemonic(self):
 		if self.seed:
@@ -249,31 +309,29 @@ class Wallet:
 		if self.seed is None and self.master_xprv is not None:
 			raise TypeError("Wallet was created from ExtendedPrivateKey. Seed unknown.")
 
-
 	@staticmethod
 	def fingerprint(xpub):
 		return hash160(xpub.to_pub_key().sec())[:4]
 
-	def master_fingerprint(self):
-		return fingerprint(self.master_xpub)
+	def master_fingerprint(self): 
+		return self.fingerprint(self.master_xpub)
 
 	def import_seed(self, seed, passphrase):
 		self.seed = seed
 		self.master_xprv = seed.derive_master_priv_key(passphrase=passphrase, testnet=self.testnet)
-		if self.master_xpub:
-			newXpub = self.derive_key((self.wallet_acct), priv=True).to_extended_pub_key()
+		if self.acct_xpub:
+			newXpub = self.derive_key(self.wallet_acct, priv=True, absolute=True).to_extended_pub_key()
 			if self.master_fingerprint() != self.fingerprint(newXpub):
 				raise ConfigurationError("Import Failed.")
 		else:
-			self.master_xpub = self.derive_key((self.wallet_acct), priv=True).to_extended_pub_key()
+			self.acct_xpub = self.derive_key(self.wallet_acct, priv=True, absolute=True).to_extended_pub_key()
 		self.watch_only = False
-
-		
+	
 #----- WALLET FUNCTIONS -----
 #
 #----------------------------
 
-	def derive_key(self, path, priv):
+	def derive_key(self, path, priv, absolute=False):
 		"""
 		General function for deriving any key in the account.
 		"""
@@ -282,8 +340,13 @@ class Wallet:
 		if priv:
 			if self.watch_only:
 				raise TypeError("Watch only wallets cannot access Private Keys.")
+			if absolute:
+				child = self.master_xprv
+			else:
+				if path[:len(self.wallet_acct)] == self.wallet_acct:
+					path = path[len(self.wallet_acct):]
+				child = self.acct_xprv
 			levels = path.split("/")
-			child = self.master_xprv
 			for i in levels:
 				try:
 					if i[-1] == "'":
@@ -295,7 +358,9 @@ class Wallet:
 			return child
 		# public keys
 		else:
-			child = self.master_xpub
+			if absolute:
+				path = path.replace(self.wallet_acct, "", 1)
+			child = self.acct_xpub
 			levels = path.split("/")
 			for i in levels:
 				try:
@@ -304,9 +369,9 @@ class Wallet:
 					child = child.derive_pub_child(int(i))
 				except IndexError:
 					continue
-			return child
+			return child	
 
-	def new_pub_key(self, label=[], external=True):
+	def new_pub_key(self, external=True):
 		""" 
 		generates and returns the next pubkey from the external 
 		chain and adds an HDPubKey to self.hdpubkeys
@@ -323,19 +388,18 @@ class Wallet:
 			path = f"{self.int_chain}/{self.int_count}"
 			self.int_count+=1
 		pubkey = self.derive_key(path, priv=False).to_pub_key()
-		#print(path)
-		
 		fullpath = self.wallet_acct + path
-		if type(label) == str:
-			label = [label]
-		hpk = HDPubKey(pubkey, path=fullpath, label=label, testnet=self.testnet)
-		hpk.check_state()
-		self.hdpubkeys.append(hpk)
-		return hpk
+		# hpk = HDPubKey(pubkey, path=fullpath, label=label, testnet=self.testnet)
+		# hpk.check_state()
+		# self.hdpubkeys.append(hpk)
+		return pubkey, fullpath
 
-	def new_address(self, label=[], external=True):
-		""" returns unused address and stores the associated pubkey in self.hdpubkeys """
-		return self.new_pub_key(label=label, external=external).pubkey.address(testnet=self.testnet)
+	def new_script_pubkey(self, external=True, label=[]):
+		pubkey, path = self.new_pub_key(external)
+		script_pubkey = self.script_func(pubkey)
+		hd_spk = HDScriptPubKey(script_pubkey, self.script_name, path, label)
+		self.sql_add_script_pubkey(hd_spk)
+		return script_pubkey
 
 	def check_state(self):
 		""" calls check_state on each hdPubKey. Sets balance and updates txcount. """
@@ -358,10 +422,53 @@ class Wallet:
 			raise TypeError("Watch only wallet")
 		return self.derive_key(self.hdpubkeys[i].path, priv=True).to_priv_key()
 
-	def find_priv_key(self, sec):
-		for i, p in enumerate(self.hdpubkeys):
+	def __find_priv_key(self, sec):
+		for i, p in enumerate(self.hdpubkey):
 			if p.pubkey.sec() == sec:
 				return self.get_priv_key(i)
+		return False
+
+	def priv_key_match(self, hd_script_pubkey):
+		pass
+	def generate_x_keys(self, x, external=True):
+		for i in range(x):
+			self.new_pub_key(external=external)
+		return self.get_balance
+
+	@classmethod
+	def pubkey_to_p2pkh_script(cls, pubkey):
+		h160 = pubkey.hash160()
+		return p2pkh_script(h160)
+
+	@classmethod
+	def pubkey_to_p2wpkh_script(cls, pubkey):
+		h160 = pubkey.hash160()
+		return p2wpkh_script(h160)
+
+	@classmethod
+	def pubkey_to_p2sh_p2wpkh_script(cls, pubkey):
+		# redeem script is p2wpkh script
+		redeemscript = cls.pubkey_to_p2wpkh_script(pubkey)
+		# h160 is hash of redeemscript
+		h160 = hash160(redeemscript.serialize())
+		return p2sh_script(h160)
+
+	def new_legacy_address(self, label=[], external=True):
+		""" returns unused address and stores the associated pubkey in self.hdpubkeys """
+		return self.new_pub_key(label=label, external=external).pubkey.address(testnet=self.testnet)
+
+	def new_p2wpkh_address(self, label=[], external=True):
+		""" returns unused address and stores the associated pubkey in self.hdpubkeys """
+		pk = self.new_pub_key(label=label, external=external).pubkey
+		h160 = pk.hash160()
+		return h160_to_p2wpkh(h160, witver=0, testnet=self.testnet)
+
+	def new_address(self, external=True, label=[]):
+		return self.new_script_pubkey(external=external, label=label).to_address(testnet=self.testnet)
+
+	@classmethod
+	def address_to_script_pubkey(cls, addr):
+		return Script.from_address(addr)
 
 #----- TRANSACTION FUNCTIONS -----
 #
@@ -406,141 +513,120 @@ class Wallet:
 		else: 
 			return False
 	
-	@staticmethod
-	def create_tx_out(amount, address, script_type=p2pkh_script):
-		return TxOut(amount, script_type(address))
+	@classmethod
+	def create_tx_out_from_address(cls, amount, address):
+		script_pubkey = Script.from_address(address)
+		return TxOut(amount, script_pubkey)
 
-	def create_p2pkh(self, outputs, fee, locktime=0, priority="oldest", auto_sign=False, data=None):
+	@classmethod
+	def create_tx_out(cls, amount, script_pubkey):
+		return TxOut(amount, script_pubkey)
+
+	@classmethod
+	def create_tx_in(cls, prev_tx, vout, script_sig=None):
+		if type(prev_tx) == str:
+			prev_tx = bytes.fromhex(prev_tx)
+		return TxIn(prev_tx, vout, script_sig)
+
+	@classmethod
+	def contains_segwit(cls, script_pubkeys):
+		for s in script_pubkeys:
+			if s.is_p2wpkh_script_pubkey() or s.is_p2wsh_script_pubkey():
+				return True
+		return False
+
+	@classmethod
+	def create_unfunded_transaction(cls, outputs, testnet=False, version=1, locktime=0):
 		"""
-		-outputs is a list of tuples (amount, address)
+		-inputs is a list of tuples(bytes prev_txid, int vout)
+		-outputs is a list of tuples (int amount, Script script_pubkey)
+		returns Tx object
 		"""
-		amountOut = sum([o[0] for o in outputs])
-		pubkeys = self.select_utxos(amountNfee=(amountOut+fee), priority=priority, data=data)
+		tx_outs = [cls.create_tx_out(o[0], o[1]) for o in outputs]
+		return Tx(version, [], tx_outs, locktime=locktime, testnet=testnet, segwit=False)
+
+
+	def fund_transaction(self, tx, priority="biggest", exclude_script_types=[], sighash_type=SIGHASH_ALL):
+		# if psbt: #UNUSED WOULDNT WORK
+		# 	tx = Tx.parse(BytesIO(psbt.get_unsigned_tx()))
+		# if tx is None:
+		# 	raise RuntimeError("No transaction to fund.")
+		amountOut = tx.amount_out()
+		utxos, segwit = self.utxo_selection(amountOut, priority=priority, exclude_script_types=exclude_script_types)
+		tx_ins = []
+		for utxo in utxos:
+			tx_in = self.create_tx_in(utxo.txid, utxo.vout)
+			tx_ins.append(tx_in)
+		tx.tx_ins = tx_ins
+		tx.segwit = segwit
+		#outpoints = [(tx_in.prev_txid(), tx_in.vout) for tx_in in  tx_obj.tx_ins]
+		psbt_cr = Creator.from_tx(tx, segwit)
+		psbt_up = Updater(psbt_cr.serialize())
+		for idx, tx_in in enumerate(tx.tx_ins):
+			script = self.sql_get_script_from_utxo(tx_in.prev_txid(), tx_in.vout)
+			tx_hex = get_transaction_hex(tx_in.prev_txid())
+			if script.script_name in ["p2wpkh", "p2wsh", "p2sh-p2wpkh"]:
+				psbt_up.add_witness_utxo(idx, tx_hex, tx_in.vout)
+			else:
+				psbt_up.add_nonwitness_utxo(idx, tx_hex)
+			if script.script_name == "p2sh-p2wpkh":
+				#TODO get path and generate redeemScript
+				# add redeemScript to input
+				raise NotImplementedError
+			tx.segwit = segwit
+			psbt_up.set_unsigned_tx(tx.serialize)
+
+			psbt_up.add_sighash_type(idx, sighash_type)
+			pubkey = self.derive_key(script.path, priv=False, absolute=True)
+			path = script.get_path_bytes()
+			psbt_up.add_input_pubkey(idx, pubkey, self.master_fingerprint(), path)
+		return psbt_up.serialize()
+
+	def update_funded_psbt(self, ser_psbt):
+		""" redundant with fund_transaction """
+		psbt_up = Updater(ser_psbt)
+		tx_obj = psbt_up.psbt.get_tx_obj()
+		outpoints = [(tx_in.prev_txid(), tx_in.vout) for tx_in in  tx_obj.tx_ins]
+	
+	def utxo_selection(self, amountOut, priority="biggest", exclude_script_types=[]):
+		scripts_to_use = []
 		amountIn = 0
-		tx_ins =[]
-		change_labels = []
-		for pubkey in pubkeys:
-			#print(pubkey.pubkey.address(testnet=True))
-			change_labels += pubkey.label
-			for utxo in pubkey.utxos:
-				#TX INS
-				tx_ins.append((bytes.fromhex(utxo.tx_id), utxo.vout))
+		excluded = 0
+		segwit = False
+		if priority in ["biggest", "smallest"]:
+			scripts = self.sql_find_unspent_scripts()
+			if priority == "smallest":
+				sorted_scripts = sorted(scripts, key=lambda item: item.amount)
+			else:
+				sorted_scripts = sorted(scripts, key=lambda item: item.amount, reverse=True)
+			for s in sorted_scripts:
+				if s.script_name not in exclude_script_types and "FREEZE" not in s.label:
+					amountIn += s.amount
+					scripts_to_use.append(s.script_id)
+					if s.script_name in ["p2wpkh", "p2wsh", "p2sh-p2wpkh"]:
+						segwit = True
+				else:
+					excluded += 1
+				if amountIn  > amountOut:
+					break
+		# Check amountIn > AmountOut
+		if amountIn < amountOut:
+			raise TransactionError(f"Insufficient Funds: {excluded} scriptPubKeys were excluded.")
+		utxos = self.sql_get_utxos_by_script_ids(scripts_to_use)
+		return utxos, segwit
 
-			amountIn += pubkey.balance
-
-		#TX OUTS
-		tx_outs = outputs
-		#change output
-		change_amount = amountIn - fee - amountOut
-		change_pub_key = self.new_pub_key(label=change_labels, external=False)
-		change_addr = decode_base58(change_pub_key.pubkey.address(testnet=self.testnet))
-		
-		tx_outs.append((change_amount, change_addr))
-		
-		#Signing
-		if auto_sign:
-			for output in outputs:
-				tx_outs.append(Wallet.create_tx_out(output[0], output[1], script_type=p2pkh_script))
-
-			tx_obj = Tx(self.TX_VERSION, tx_ins, tx_outs, locktime, testnet=self.testnet)
-			for i in range(len(pubkeys))):
-				if not tx_obj.sign_input(i, self.get_priv_key(i)):
-					raise SignatureError(f"Signing Input {i} failed.")
-			if not tx_obj.verify():
-				raise TransactionError("Invalid Transaction")
-			return tx_obj.serialize()
-
-		else:
-			psbt_cr = Creator(tx_ins, tx_outs, locktime=locktime).serialize()
-			psbt_up = Updater(psbt_cr)
-			psbt_up.add_output_pubkey(-1, change_pub_key.pubkey.sec(), self.master_fingerprint(), change_pub_key.get_path())
-			for i in range(len(pubkeys)):
-				psbt_up.add_input_pubkey(i, self.hdpubkeys[i].pubkey.sec(), self.master_fingerprint(), pubkey.get_path())
-				psbt_up.add_sighash_type(i, sighash=SIGHASH_ALL)
-				psbt_up.add_nonwitness_utxo(i, bytes.fromhex(get_transaction_hex(tx_ins[i].hex())))
-			return psbt_up.serialize()
-
-	def create_p2pkh_old(self, amount, address, fee, locktime=0, priority="oldest", data=None):
-		pubkeys = self.select_utxos(amountNfee=(amount+fee), priority=priority, data=data)
-		
-		amountIn = 0
-		#change_labels = ""
-		#stripped_pubkeys = []
-		tx_ins =[]
-		for pubkey in pubkeys:
-			#print(pubkey.pubkey.address(testnet=True))
-			amountIn += pubkey.balance
-			#change_labels += " ".join(pubkey.label)
-			for utxo in pubkey.utxos:
-				#TX INS
-				tx_ins.append(TxIn(bytes.fromhex(utxo.tx_id), utxo.vout))
-				#stripped_pubkeys.append(pubkey.pubkey)
-
-		#TX OUTS
-		tx_outs = self.craft_tx_outs(amountIn=amountIn, amountOut=amount, fee=fee, address=address, script_type=p2pkh_script)
-		
-		transaction = Tx(self.TX_VERSION, tx_ins, tx_outs, locktime, testnet=self.testnet)
-		#Signing
-		for i, pubkey in enumerate(pubkeys):
-			if not transaction.sign_input(i, self.get_priv_key(pubkey)):
-				raise SignatureError(f"Signing Input {i} failed.")
-		if not transaction.verify():
-			raise TransactionError("Invalid Transaction")
-		return transaction
-
-	def select_utxos(self, amountNfee, priority="oldest", data=None):
-		"""
-		function for choosing utxos to use for a transaction.
-		param: amountNfee is amount to be sent including fee.
-		priority allows for options in terms of choosing 
-		which utxos to spend. Options:
-			- "oldest": uses oldest utxos first (by derivation path, not utxo age)
-			- "biggest": uses fewest and biggest utxos possible
-			- "smallest": uses fewest number of smallest utxos
-			- "below": uses ALL utxos below amount specified in data
-		"""
-		balance = self.get_balance()
-		if balance < amountNfee:
-			raise TransactionError("Insufficient Funds for this transaction.")		
-		pAmount = 0
-		pubkeys = []
-		if priority == "oldest":
-			for pubkey in self.hdpubkeys:
-				#TODO if "NoSpend" not in pubkey.label:
-				if pubkey.balance > 0:
-					pubkey.set_confirmed_utxos()
-					for _ in pubkey.utxos:
-						pubkeys.append(pubkey)
-					pAmount += pubkey.balance
-					if pAmount >= amountNfee:
-						break
-
-		elif priority == "biggest":
-			balances = []
-			for _ in range(len(self.hdpubkeys)):
-				nextKey = max(self.hdpubkeys, key=(lambda x: x.balance))
-				#TODO if "NoSpend" not in pubkey.label:
-				pubkeys.append(nextKey)
-				pAmount += nextKey.balance
-				if pAmount >= amountNfee:
-						break
-			
-		elif priority == "smallest":
-			balances = []
-			for _ in range(len(self.hdpubkeys)):
-				nextKey = min(self.hdpubkeys, key=(lambda x: x.balance))
-				#TODO if "NoSpend" not in pubkey.label:
-				pubkeys.append(nextKey)
-				pAmount += nextKey.balance
-				if pAmount >= amountNfee:
-						break
-
-		elif priority == "below":
-			raise NotImplementedError("Priority algorithm not implemented yet.")
-
-		if pAmount < amountNfee:
-			raise TransactionError("Insufficient Funds for this transaction.")		
-		return pubkeys
+	def get_utxos_from_hd_script_pubkey(self, scripts_to_use):
+		# get UTXOs from each Script
+		utxo_list = self.walletdb.get_utxos_by_script_ids([s.script_id for s in scripts_to_use])
+		utxos = [UTXO(
+			txid=utxo[0], 
+			vout=utxo[1], 
+			amount=utxo[2], 
+			script_id=utxo[5],
+			block_height=utxo[3], 
+			status=utxo[4]) 
+			for utxo in utxo_list]
+		return utxos
 	
 	def sign_psbt(self, serialized_psbt):
 		""" 
@@ -555,18 +641,20 @@ class Wallet:
 		- If a sighash type is not provided, the signer signs using SIGHASH_ALL
 		"""
 		psbt_si = Signer(serialized_psbt)
-		tx_obj = Tx.parse(psbt_si.get_unsigned_tx())
+		tx_obj = Tx.parse(BytesIO(psbt_si.get_unsigned_tx()))
 		for i in range(len(psbt_si.psbt.maps["inputs"])):
 			curr_input = psbt_si.psbt.maps["inputs"][i]
 			# check prev_tx_id
 			if IN_NON_WITNESS_UTXO in curr_input:
-				psbt_tx_id = hash256(curr_input[IN_NON_WITNESS_UTXO])[::-1]
+				psbt_tx_id = hash256(curr_input[IN_NON_WITNESS_UTXO])
 				gutx_tx_id = tx_obj.tx_ins[i].prev_tx
 				if psbt_tx_id != gutx_tx_id:
 					raise PSBTError(f"UTXO {i} and Unsigned TX input {i} have different prev_tx_id: {psbt_tx_id} vs {gutx_tx_id}")
+			# TODO SegWit
 			elif IN_WITNESS_UTXO in curr_input:
-				raise NotImplementedError("SegWit Soon(tm)")
-			# Look for redeemScripts
+				pass
+			# TODO Handle RedeemScripts
+			#  Look for redeemScripts
 			if IN_REDEEM_SCRIPT in curr_input:
 				raise NotImplementedError("Redeem Scripts not signable Yet. Unknown how to find ScriptPubKey")
 			# read sighash
@@ -576,25 +664,31 @@ class Wallet:
 			elif sighash_type != SIGHASH_ALL:
 				raise NotImplementedError("Other sighash types not yet supported.")
 			# sign
-			pubkey = psbt_si.get_input_pubkey(i)
-			privkey = psbt_si.find_priv_key(pubkey)
-			if not tx_obj.sign_input(i, privkey, sighash_type=sighash_type):
-				raise SignatureError(f"Signing of input {i} failed.")
-			sig = tx_obj.tx_ins[i].script_sig.cmds[0]
-			psbt_si.add_partial_sig(sig, pubkey, i)
+			pubkey_sec, fingerprint, path = psbt_si.get_bip32_info(i)
+			if fingerprint.hex() == self.master_fingerprint():
+				privkey = self.derive_key(path, priv=True, absolute=True).to_priv_key()
+				if privkey.point.sec() == pubkey_sec:
+					script_sig = tx_obj.sign_input(i, privkey, sighash_type)
+					if not script_sig:
+						raise SignatureError(f"Signing of input {i} failed.")
+					sig = script_sig.cmds[0]
+					psbt_si.add_partial_sig(sig, pubkey_sec, i)
+				else:
+					raise PSBTWarning(f"Private Key does not match pubkey provided. Skipping input {i}...")
+			else:
+				raise PSBTWarning(f"Fingerprint does not match this wallet. Skipping input {i}...")
 		return psbt_si.serialize()
 
 	@staticmethod
-	def finalize(serialized_psbt):
+	def finalize_psbt(serialized_psbt):
 		return Finalizer(serialized_psbt)
 
 	@staticmethod
-	def extract(serialize_psbt):
+	def extract_psbt(serialized_psbt):
 		return Extractor(serialized_psbt)
 
 	def quick_sign(self, serialized_psbt):
-		extract(finalize(sign_psbt(serialized_psbt)))
-		
+		return self.extract_psbt(self.finalize_psbt(self.sign_psbt(serialized_psbt)))
 
 	@staticmethod
 	def broadcast(tx_bytes):
@@ -607,16 +701,81 @@ class Wallet:
 	def create_p2sh(self, address, amount, fee, priority="oldest", data=None):
 		raise NotImplementedError("coming soon")
 
-#----- EXTERNAL FUNCTIONS -----
+#----- SQL FUNCTIONS -----
 #
-#------------------------------
-	
+#-------------------------
+	def get_balance(self):
+		unspent_scripts = self.sql_find_unspent_scripts()
+		return sum([s.amount for s in unspent_scripts])
+
+	def sql_add_script_pubkey(self, hd_script_pubkey):
+		self.walletdb.add_script(hd_script_pubkey)
+
+	def sql_add_utxo(self, utxo):
+		self.walletdb.add_utxo(utxo)
+
+	def sql_get_all_utxos(self):
+		pass #TODO
+
+	def rescan_scripts(self):
+		scripts = self.walletdb.get_all_scripts()
+		for s in scripts:
+			script_id = s[0]
+			script = Script.parse(BytesIO(bytes.fromhex(s[1])))
+			addr = script.to_address(testnet=self.testnet)
+			utxos = get_address_utxo(addr, testnet=self.testnet)
+			for u in utxos:
+				self.sql_add_utxo(UTXO(u.tx_id, u.vout, u.amount, script_id, u.block_height, u.status))
+
+	def sql_find_unspent_scripts(self):
+		scripts = self.walletdb.get_all_scripts()
+		unspent_scripts = []
+		for s in scripts:
+			script_id = s[0]
+			script = Script.parse(BytesIO(bytes.fromhex(s[1])))
+			addr = script.to_address(testnet=self.testnet)
+			utxos = get_address_utxo(addr, testnet=self.testnet)
+			for u in utxos:
+				self.sql_add_utxo(UTXO(u.tx_id, u.vout, u.amount, script_id, u.block_height, u.status))
+				if u.amount > 0 and u.status not in ["spent", "unconfirmed"]:
+					amt = sum([u.amount for u in utxos])
+					hdspk = HDScriptPubKey(script, s[2], s[3], script_id=script_id, amount=amt)
+					unspent_scripts.append(hdspk)
+					break
+		return unspent_scripts
+
+	def sql_get_utxos_by_script_ids(self, script_ids, order="DESC"):
+		utxos = self.walletdb.get_utxos_by_script_ids(script_ids, order=order)
+		return [UTXO(txid=u[0], vout=u[1], amount=u[2], block_height=u[3], status=u[4], script_id=u[5]) for u in utxos]
+
+	def sql_find_unspent_utxos(self):
+		pass
+
+	def sql_get_script_name_from_utxo(self, txid, vout):
+		"""
+		outpoint: (txid, vout)
+		"""
+		return self.walletdb.get_script_name_from_utxo(txid, vout)
+
+	def sql_get_script_from_utxo(self, txid, vout):
+		"""
+		outpoint: (txid, vout)
+		"""
+		s = self.walletdb.get_script_from_utxo(txid, vout)
+		script_pubkey = Script.parse(BytesIO(bytes.fromhex(s[1])))
+		return HDScriptPubKey(script_pubkey, s[2], s[3])
+
+
+#----- FILE FUNCTIONS -----
+#
+#--------------------------
+
 	def to_json(self):
 		perm = "watch" if self.watch_only else "total"
 		netw = "test" if self.testnet else "main"
 		d = {
-			"FINGERPRINT": self.fingerprint(self.master_xpub).hex(),
-			"ACCT_XPUB": self.master_xpub.__repr__(),
+			"FINGERPRINT": self.fingerprint().hex(),
+			"ACCT_XPUB": self.acct_xpub.__repr__(),
 			"ACCT_PATH": self.wallet_acct,
 			"NETWORK": netw,
 			"PERMISSION": perm,
@@ -638,22 +797,18 @@ class Wallet:
 		hdpubkeys = []
 		for hpk in data["HdPubKeys"]:
 			path = hpk["FullKeyPath"]
-			#print(path)
+			
 			hdpubkey = HDPubKey.parse(hpk)
 			hdpubkeys.append(hdpubkey) 
 			#decide if external or internal key
 			if w.acct_path in path:#FIX 
 				path = path[len(w.acct_path)]
 				path = path.replace(w.acct_path, '')
-				
 				if path[0] == "0":
-					#print(path[0])
 					ext_count += 1
 				elif path[0] == "1":
-					#print(path[0])
 					int_count += 1
 				else:
-					#print(path[0])
 					pass
 		w.hdpubkeys = hdpubkeys
 		w.ext_count = ext_count
@@ -708,10 +863,8 @@ class Wallet:
 		if self.seed is not None:
 			l = len(self.seed.bits) 
 			bits = self.seed.bits[:-(l//33)] #take off checksum
-			#print(bits)
 			seed_bytes = SEED_PREFIX
 			seed_bytes += int(bits, 2).to_bytes(len(bits)//8, 'big')
-			#print("seedlen0:",len(seed_bytes)-4)
 			encrypted_secret = encrypt(seed_bytes, password)
 		elif self.master_xprv is not None:
 			xprv_bytes = XPRV_PREFIX
@@ -734,7 +887,6 @@ class Wallet:
 			fOut = fp.read()
 		secret = decrypt(fOut, password)
 		if secret[:4] == SEED_PREFIX:
-			#print("seedlen1:", len(secret[4:]))
 			seed = Seed.from_bytes(secret[4:])
 			self.import_seed(seed, passphrase=password)
 		elif secret[:4] == XPRV_PREFIX:
@@ -757,48 +909,28 @@ class Wallet:
 		s = Seed.from_mnemonic(mnemonic, lang=lang)
 		return cls(name=name, passphrase=passphrase, testnet=testnet, data=s, watch_only=False)
 
+	def dump_to_text_file(self, filename="dump.txt"):
+		with open(filename, "w") as fp:
+			mnemonic = " ".join(s.mnemonic())
+			fp.write(mnemonic)
+			fp.write("\n")
+			fp.write(w.master_xprv.__repr__())
+
 if __name__ == "__main__":
-	
-	# s = Seed.new(128)
-	
-
-	# w = Wallet(data=s, passphrase="password1", testnet=True, watch_only=False)
-	# with open("dump.txt", "w") as fp:
-	# 	mnemonic = " ".join(s.mnemonic())
-	# 	fp.write(mnemonic)
-	# 	fp.write("\n")
-	# 	fp.write(w.master_xprv.__repr__())
-	
-	# w.write_json(filename="test")
-	# w.write_secret(filename="test", password="password1")
-	# #w2 = Wallet.read_json(filename="test")
-
-	# #w2.read_secret(filename="test", password="password1")
-	# #print(w2.hdpubkeys)
-	# #print(len(w2.hdpubkeys))
-	# print(w.new_address(label="faucet", external=True))
-
-
-	#w2 = Wallet(passphrase="password1", testnet=True, watch_only=False)
-	#w2.read_secret(filename="test", password="password1")
-	# for i in range(7):
-	# 	w2.new_pub_key(external=True)
-	# for pk in w2.hdpubkeys:
-	# 	print(pk.pubkey.address(testnet=True), pk.balance)
-	# amount = 80000
-	# fee = 400
-	# addr = "mkHS9ne12qx9pS9VojpwU5xtRd4T7X7ZUt"
-
-	# tx = w2.create_p2pkh(amount, addr, fee)
-	# print(tx.serialize().hex())
-	w = Wallet.new()
-	print(w.hdpubkeys[0].path)
-	b = w.hdpubkeys[0].get_path()
-	path = []
-	for i in range(4):
-		path.append(little_to_int(b[i*4:(i+1)*4]))
-	print(path)
-
+	vprv = ExtendedPrivateKey.parse("vprv9DMUxX4ShgxMMgFg47GgyXn6c7RJfHDuGaq7p6xpUrpnwZSd5pYkcpiFXhBpbkPaPT8d3761jfK15mhxa7a1EzAqvECGNS9p9zZwmcBFpd2")
+	w = Wallet(data=vprv, passphrase="password1")
+	addr = Address("tb1q3flmxda7pnc0dpae6upqht5ru4l7u97l36jvxl") # to me
+	addr2 = Address("tb1qrk0tyy2met20gcpfxg835ldqvckpam5s4p0nj6") # to david
+	amt = 50000
+	amt2 = 48000
+	w.new_address()
+	w.new_address()
+	w.new_address()
+	print(w.get_balance())
+	tx_out = (amt, Wallet.address_to_script_pubkey(addr))
+	tx_out2 = (amt2, Wallet.address_to_script_pubkey(addr2))
+	tx = w.create_unfunded_transaction([tx_out, tx_out2])
+	psbt_ser = w.fund_transaction(tx)
 
 
 

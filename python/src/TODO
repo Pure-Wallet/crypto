@@ -1,0 +1,14 @@
+FIX derive_key
+
+complete fund_transaction()
+
+
+Write full wallet to file
+Read full wallet from file
+
+Complete integration of Address class 
+Complete TX construction. 
+
+Complete PSBT integration
+
+Descriptors

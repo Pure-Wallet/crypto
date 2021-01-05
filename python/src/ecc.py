@@ -1,4 +1,3 @@
-
 from unittest import TestCase
 from io import BytesIO
 import hashlib
@@ -8,9 +7,10 @@ from helper import (
 	hash256,
 	encode_base58_checksum
 )
-
 from random import randint
 
+P2PKH_MAIN_PREFIX = b'\x00'
+P2PKH_TEST_PREFIX = b'\x6f'
 
 '''
 gx = 0x79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798
@@ -19,6 +19,10 @@ n =  0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141
 p = 2**256 - 2**32 - 977 
 y**2 = x**3 + 7
 '''
+
+class SignatureError(Exception):
+	""" An error was encountered while signing or verifying a signature """
+	pass
 
 class FieldElement:
 	def __init__(self, num, order):
@@ -226,12 +230,13 @@ class S256Point(Point):
 		return hash160(self.sec(compressed))
 	
 	def address(self, compressed=True, testnet=False):
-		'''Returns address string'''
+		'''Returns legacy address string'''
 		h160 = self.hash160(compressed)
-		prefix = b'\x00'
+		prefix = P2PKH_MAIN_PREFIX
 		if testnet:
-			prefix = b'\x6f'
+			prefix = P2PKH_TEST_PREFIX
 		return encode_base58_checksum(prefix + h160)
+
 
 # Generator Point. (secret * G) = PubKey
 G = S256Point(
@@ -239,10 +244,6 @@ G = S256Point(
     0x483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8, 
 	S256Field(A),
 	S256Field(B))
-
-class SignatureError(Exception):
-	""" An error was encountered while signing or verifying a signature """
-	pass
 
 class Signature:
 	def __init__(self, r, s):
@@ -297,6 +298,9 @@ class PrivateKey:
 	def __init__(self, secret):
 		self.secret = secret
 		self.point = secret * G
+
+	def __repr__(self):
+		return self.hex()
 
 	def hex(self):
 		return '{:x}'.format(self.secret).zfill(64)

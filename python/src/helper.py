@@ -3,11 +3,16 @@ from unittest import TestCase, TestSuite, TextTestRunner
 import hashlib
 
 
-SIGHASH_ALL = 1
-SIGHASH_NONE = 2
-SIGHASH_SINGLE = 3
+SIGHASH_ALL = 0x01
+SIGHASH_NONE = 0x02
+SIGHASH_SINGLE = 0x03
+SIGHASH_ANYONECANPAY = 0x80
 BASE58_ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
 TWO_WEEKS = 60 * 60 * 24 * 14
+#SEGWIT
+
+
+SUPPORTED_SEGWIT_VERSIONS = [0]
 
 
 def run(test):
@@ -121,7 +126,9 @@ def h160_to_p2sh_address(h160, testnet=False):
     else:
         prefix = b'\x05'
     return encode_base58_checksum(prefix + h160)
+	
 
+# BLOCKS
 
 def bits_to_target(bits):
     '''Turns bits into a target (large 256-bit integer)'''
@@ -272,3 +279,12 @@ def a2b_base58(s):
 """
 end source from pycoin
 """
+
+if __name__ == "__main__":
+    stack = [b'', hash160(bytes.fromhex("0279BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798AC"))]
+    print(stack)
+    if len(stack) == 2 and stack[0] in [b'', b'\x00'] and type(stack[1]) == bytes and len(stack[1]) == 20:
+        h160 = stack.pop()
+        op0 = stack.pop()
+    print(h160)
+    print(op0)

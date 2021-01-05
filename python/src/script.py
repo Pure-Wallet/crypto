@@ -7,6 +7,8 @@ from helper import (
     int_to_little,
     little_to_int,
     read_varint,
+    encode_base58_checksum,
+    decode_base58
 )
 from op import (
     op_equal,
@@ -15,6 +17,23 @@ from op import (
     OP_CODE_FUNCTIONS,
     OP_CODE_NAMES,
 )
+from bech32 import (
+    h160_to_p2wpkh,
+    h256_to_p2wsh,
+    bech32_address_decode,
+    Bech32Error
+)
+
+from address import (
+    P2SH_MAIN_PREFIX,
+    P2SH_TEST_PREFIX,
+    P2PKH_MAIN_PREFIX,
+    P2PKH_TEST_PREFIX,
+    LEGACY_TEST_PREFIX,
+    LEGACY_MAIN_PREFIX,
+    Address
+)
+
 
 
 def p2pkh_script(h160):
@@ -26,9 +45,20 @@ def p2sh_script(h160):
     '''Takes a hash160 and returns the p2sh ScriptPubKey'''
     return Script([0xa9, h160, 0x87])
 
+def p2wpkh_script(h160):
+    '''Takes a hash160 and returns p2wpkh ScriptPubKey'''
+    return Script([0x00, h160])
+
+def p2wsh_script(h256):
+    '''Takes a hash256 and returns p2wsh ScriptPubKey'''
+    return Script([0x00, h256])
+
+
 
 LOGGER = getLogger(__name__)
 
+class ScriptError(ValueError):
+    pass
 
 class Script:
 
@@ -72,7 +102,7 @@ class Script:
             current_byte = current[0]
             # if the current byte is between 1 and 75 inclusive
             if current_byte >= 1 and current_byte <= 75:
-                # we have an cmd set n to be the current byte
+                # we have a cmd set n to be the current byte
                 n = current_byte
                 # add the next n bytes as an cmd
                 cmds.append(s.read(n))
@@ -137,7 +167,10 @@ class Script:
         # encode_varint the total length of the result and prepend
         return encode_varint(total) + result
 
-    def evaluate(self, z):
+    def hex(self):
+        return self.serialize().hex()
+
+    def evaluate(self, z, witness=None):
         # create a copy as we may need to add to this list if we have a
         # RedeemScript
         cmds = self.cmds[:]
@@ -171,6 +204,7 @@ class Script:
             else:
                 # add the cmd to the stack
                 stack.append(cmd)
+                # p2sh rule: if the next 3 cmds are: OP_HASH160 (0xa9) <20 byte hash> OP_EQUAL (0x87) this is redeemScript
                 if len(cmds) == 3 and cmds[0] == 0xa9 \
                     and type(cmds[1]) == bytes and len(cmds[1]) == 20 \
                     and cmds[2] == 0x87:
@@ -191,6 +225,13 @@ class Script:
                     redeem_script = encode_varint(len(cmd)) + cmd
                     stream = BytesIO(redeem_script)
                     cmds.extend(Script.parse(stream).cmds)
+                # Witness program v0 rule: if stack cmds are: 0 <20 byte hash> this is p2wpkh
+                if len(stack) == 2 and stack[0] in [b'', b'\x00'] and type(stack[1]) == bytes and len(stack[1]) == 20:
+                    h160 = stack.pop()
+                    stack.pop()
+                    cmds.extend(witness)
+                    cmds.extend(p2pkh_script(h160).cmds)
+
         if len(stack) == 0:
             return False
         if stack.pop() == b'':
@@ -212,6 +253,68 @@ class Script:
             and type(self.cmds[1]) == bytes and len(self.cmds[1]) == 20 \
             and self.cmds[2] == 0x87
 
+    def is_p2wpkh_script_pubkey(self):
+        '''Returns whether this follows the OP_0 <20 byte hash> pattern.'''
+        return len(self.cmds) == 2 and self.cmds [0] == 0x00 and type(self.cmds[1]) == bytes and len(self.cmds[1]) == 20
+
+    def is_p2wsh_script_pubkey(self):
+        '''Returns whether this follows the OP_0 <32 byte hash> pattern.'''
+        return len(self.cmds) == 2 and self.cmds[0] == 0x00 and type(self.cmds[1]) == bytes and len(self.cmds[1]) == 32
+
+    def to_address(self, testnet=False):
+        # TODO maybe pass script type ?
+        if self.is_p2pkh_script_pubkey():
+            h160 = self.cmds[2]
+            prefix = P2PKH_TEST_PREFIX if testnet else P2PKH_MAIN_PREFIX
+            return Address(encode_base58_checksum(prefix + h160))
+        elif self.is_p2sh_script_pubkey():
+            h160 = self.cmds[1]
+            prefix = P2SH_TEST_PREFIX if testnet else P2SH_MAIN_PREFIX
+            return Address(encode_base58_checksum(prefix + h160))
+        elif self.is_p2wpkh_script_pubkey():
+            h160 = self.cmds[1]
+            return Address(h160_to_p2wpkh(h160, witver=0, testnet=testnet))
+        elif self.is_p2wsh_script_pubkey():
+            h256 = self.cmds[1]
+            return Address(h256_to_p2wsh(h256, witver=0, testnet=testnet))
+        else:
+            return None
+
+    @classmethod
+    def from_address(cls, address):
+        testnet = address.testnet
+        addr = address.addr
+        try: # Bech32
+            witver, decoded = bech32_address_decode(addr, testnet=testnet)
+            if witver != 0:
+                raise NotImplementedError("SegWit versions > 0 not yet supported.")
+            if len(decoded) == 20:
+                return p2wpkh_script(bytes(decoded))
+            # bech32_decode raises error on all other lens
+            else: # len = 32
+                return p2wsh_script(bytes(decoded))
+        except (Bech32Error, NotImplementedError):
+            pass
+        try: # Base58
+        	parsed = decode_base58(addr) 
+        	if testnet:
+        		pkh = LEGACY_TEST_PREFIX[:2]
+        		sh = LEGACY_TEST_PREFIX[2]
+        	else:
+        		pkh = LEGACY_MAIN_PREFIX[:1]
+        		sh = LEGACY_MAIN_PREFIX[1]
+        	if addr[0] in pkh:
+        		return p2pkh_script(parsed)
+        	elif addr[0] == sh:
+        		return p2sh_script(parsed)
+        	else:
+        		raise ScriptError("Invalid mainnet legacy address prefix.")
+            
+        except Exception as e:
+        	raise ScriptError(f"Failed to parse address. Error: {e}")
+
+            
+    #TODO create "derive script type" function
 
 class ScriptTest(TestCase):
 
@@ -228,3 +331,9 @@ class ScriptTest(TestCase):
         script_pubkey = BytesIO(bytes.fromhex(want))
         script = Script.parse(script_pubkey)
         self.assertEqual(script.serialize().hex(), want)
+
+if __name__ == "__main__":
+    hex_spk = '160014006a7625ec5952ad2fc2e8fc35379995feff9245'
+    bytes_spk = BytesIO(bytes.fromhex(hex_spk))
+    script = Script.parse(bytes_spk)
+    print(script)

@@ -27,7 +27,29 @@ from helper import (
 	hash256
 )
 
-
+PSBT_CODES = {
+	"GLOBALS": {
+		b"\x00": "UNSIGNED_TX",
+		b"\x01": "GLOBAL_XPUB",
+		b"\xFB": "GLOBAL_VERSION"
+	},
+	"INPUTS": {
+		b"\x00": "IN_NON_WITNESS_UTXO",
+		b"\x01": "IN_WITNESS_UTXO",
+		b"\x02": "IN_PARTIAL_SIG",
+		b"\x03": "IN_SIGHASH_TYPE",
+		b"\x04": "IN_REDEEM_SCRIPT",
+		b"\x05": "IN_WITNESS_SCRIPT",
+		b"\x06": "IN_BIP32_DERIVATION",
+		b"\x07": "IN_FINAL_SCRIPT_SIG",
+		b"\x08": "IN_FINAL_SCRIPTWITNESS"
+	},
+	"OUTPUTS": {
+		b"\x00": "OUT_REDEEM_SCRIPT",
+		b"\x01": "OUT_WITNESS_SCRIPT",
+		b"\x02": "OUT_BIP32_DERIVATION"
+	}
+}
 
 
 MAGIC = b"\x70\x73\x62\x74" # "psbt"
@@ -105,6 +127,59 @@ class PSBT:
 			for k in sorted(o):
 				result += '\t{} : {}\n'.format(k.hex(), o[k].hex())   
 		return result
+
+	def display(self):
+		result = "=======Globals======="
+		for g in sorted(self.maps["global"].keys()):
+			result += "\n  "
+			x = g[:1]
+			result += PSBT_CODES["GLOBALS"][x]
+		result += "\n======Inputs======\n"
+		for i in self.maps["inputs"]:
+			result += "  Input:"
+			for k in sorted(i.keys()):
+				result += "\n    "
+				x = k[:1]
+				#print(PSBT_CODES["INPUTS"][k][:1])
+				result += PSBT_CODES["INPUTS"][x]
+		result += "\n======Outputs======"
+		for i in self.maps["outputs"]:
+			result += "\n  Output:"
+			for k in sorted(i.keys()):
+				result += "\n    "
+				x = k[:1]
+				result += PSBT_CODES["OUTPUTS"][x]
+		result += "\n================"
+		return result
+
+	def _vavidity_checking(self):
+		# check for unsigned tx
+		if GLOBAL_UNSIGNED_TX not in self.maps["global"]:
+			raise PSBTError("Invalid PSBT: Missing unsigned tx.")
+		else:
+			tx_obj = Tx.parse(BytesIO(self.maps["global"][GLOBAL_UNSIGNED_TX]))
+		for i in tx_obj.tx_ins:
+			if len(i.script_sig.cmds) > 0 or len(i.witness_program) > 1:
+				raise PSBTError("Invalid PSBT: Transaction in global map has ScriptSig or scriptWitness")
+		gutx_ins_count = len(tx_obj.tx_ins)
+		psbt_ins_count = len(self.maps["inputs"])
+		if gutx_ins_count == 0:
+			raise PSBTError("Invalid PSBT: unsigned tx missing inputs")
+		elif psbt_ins_count == 0:
+			raise PSBTError("Invalid PSBT: no PSBT inputs")
+		elif gutx_ins_count != psbt_ins_count:
+			raise PSBTError('Invalid PSBT: number of inputs in unsigned transaction and PSBT do not match')
+		gutx_outs_count = len(tx_obj.tx_outs)
+		psbt_outs_count = len(tx_obj.tx_outs)
+		if gutx_outs_count == 0:
+			raise PSBTError('Invalid PSBT: unsigned transaction missing outputs')
+		elif psbt_outs_count == 0:
+			raise PSBTError('Invalid PSBT: psbt has outputs')
+		elif gutx_outs_count != psbt_outs_count:
+			raise PSBTError('Invalid PSBT: number of outputs in unsigned transaction and PSBT do not match')
+
+	def get_tx_obj(self):
+		return Tx.parse(BytesIO(self.maps["global"][GLOBAL_UNSIGNED_TX]))
 # ----- SERIALIZATION -----
 #
 # -------------------------
@@ -204,26 +279,11 @@ class PSBT:
 		""" returns string base64 encoding of psbt """
 		return b64encode(self.serialize()).decode("utf-8")
 
-# ----- INPUTS -----
-#
-# ------------------
-	def add_input(self):
-		pass
-
-# ------ OUTPUTS ------
-#
-# ---------------------
-	def add_redeem_script(self, redeem_script):
-		 return PSBTOutput.REDEEM_SCRIPT + redeem_script
-		
-
-	def add_bip32_derivation(self, pubkey, fingerprint, path):
-		pass
 
 class PSBT_Role:
 	""" Class for PSBT Roles of Creator, Updater, SIgner, Finalizer """
 	def __init__(self, serialized_psbt):
-		self.psbt=psbt.parse(BytesIO(serialized_psbt))
+		self.psbt = PSBT.parse(BytesIO(serialized_psbt))
 
 	def serialize(self):
 		return self.psbt.serialize()
@@ -257,22 +317,25 @@ class PSBT_Role:
 				return True
 		return False
 
+	def set_unsigned_tx(self, tx_bytes):
+		self.psbt.maps["global"][GLOBAL_UNSIGNED_TX] = tx_bytes
+
 	def get_unsigned_tx(self):
 		return self.psbt.maps["global"][GLOBAL_UNSIGNED_TX]
 
-	def get_utxo(self, input_idx):
-		return self.psbt.maps["inputs"][input_index].get(IN_NON_WITNESS_UTXO, 
-            self.psbt.maps["inputs"][input_index].get(IN_WITNESS_UTXO))
+	def get_utxo(self, idx):
+		return self.psbt.maps["inputs"][idx].get(IN_NON_WITNESS_UTXO, 
+            self.psbt.maps["inputs"][idx].get(IN_WITNESS_UTXO))
 
-	def get_output_redeem_script(self, output_index):
+	def get_output_redeem_script(self, idx):
 		try:
-			return self.psbt.maps["outputs"][output_index][OUT_REDEEM_SCRIPT]
+			return self.psbt.maps["outputs"][idx][OUT_REDEEM_SCRIPT]
 		except KeyError:
 			raise PSBTError("Either this output index is out of bounds or there is no redeemScript for it")
         
-	def get_output_witness_script(self, output_index):
+	def get_output_witness_script(self, idx):
 		try:
-			return self.psbt.maps["outputs"][output_index][OUT_WITNESS_SCRIPT]
+			return self.psbt.maps["outputs"][idx][OUT_WITNESS_SCRIPT]
 		except KeyError:
 			raise PSBTError("Either this output index is out of bounds or there is no witnessScript for it")
         
@@ -288,21 +351,31 @@ class PSBT_Role:
 				return None
 
 	
-
 class Creator(PSBT_Role):
-	def __init__(self, inputs, outputs, version=1, input_sequence=0xffffffff, locktime=0):
+	def __init__(self, inputs, outputs, version=1, input_sequence=0xffffffff, locktime=0, segwit=False):
+		"""
+		- inputs: list of tuples (prev-tx, vout) or TxIns
+		- outputs: list of tuples (amount, script_pubkey) or TxOuts
+		"""
 		self.role = "Creator"
 		self.inputs = []
 		self.outputs = []
-		for i in inputs:
-			self.inputs.append(TxIn(prev_tx=i[0], prev_index=i[1], script_sig=b"", sequence=input_sequence))
-		for o in outputs:
-			self.outputs.append(TxOut(amount=o[0], script_pubkey=o[1]))
-		self.tx_obj = Tx(version=version, tx_ins=self.inputs, tx_outs=self.outputs, locktime=locktime)
+		if type(inputs[0]) != TxIn:
+			for i in inputs:
+				self.inputs.append(TxIn(prev_tx=i[0], prev_index=i[1], script_sig=None, sequence=input_sequence))
+		if type(outputs[0]) != TxOut:
+			for o in outputs:
+				#print(type(o[0]), type(0[1]))
+				self.outputs.append(TxOut(amount=o[0], script_pubkey=o[1]))
+		self.tx_obj = Tx(version=version, tx_ins=self.inputs, tx_outs=self.outputs, locktime=locktime, segwit=segwit)
 		serialized_tx = self.tx_obj.serialize()
-		ser_psbt = MAGIC + HEAD_SEPARATOR + self.serialize_pair(key=GLOBAL_UNSIGNED_TX, value=serialized_tx)
+		ser_psbt = MAGIC + HEAD_SEPARATOR + PSBT.serialize_pair(key=GLOBAL_UNSIGNED_TX, value=serialized_tx)
 		ser_psbt += DATA_SEPARATOR + (DATA_SEPARATOR*len(self.inputs)) + (DATA_SEPARATOR*len(self.outputs))
 		self.psbt = PSBT.parse(BytesIO(ser_psbt))
+
+	@classmethod
+	def from_tx(cls, tx, segwit=False):
+		return cls(tx.tx_ins, tx.tx_outs, tx.version, locktime=tx.locktime, segwit=segwit)
 
 	def get_utxo(self, input_index):
 		raise PSBTError("Function out of scope for this role")
@@ -313,10 +386,10 @@ class Creator(PSBT_Role):
 	def _is_witness_input(self, an_input):
 		raise PSBTError("Function out of scope for this role")
 
-	def get_output_redeem_script(self, output_index):
+	def get_output_redeem_script(self, idx):
 		raise PSBTError("Function out of scope for this role")
 	
-	def get_output_witness_script(self, output_index):
+	def get_output_witness_script(self, idx):
 		raise PSBTError("Function out of scope for this role")
 
 class Updater(PSBT_Role):
@@ -325,18 +398,18 @@ class Updater(PSBT_Role):
 		self.role = "Updater"
 
 #INPUTS
-	def add_nonwitness_utxo(self, idx, tx):
-		''''utxo in raw bytes'''
-		self.psbt.maps["inputs"][idx][IN_NON_WITNESS_UTXO] = tx
+	def add_nonwitness_utxo(self, idx, tx_hex): # CLARIFY TO TXID 
+		''''full transaction in hex'''
+		tx_bytes = bytes.fromhex(tx_hex)
+		self.psbt.maps["inputs"][idx][IN_NON_WITNESS_UTXO] = tx_bytes
 
-	def add_witness_utxo(self, idx, tx, vout):
-		tx_obj = Tx.parse(BytesIO(utxo))
-		value = tx_obj.tx_outs[vout].serialize()
-		self.psbt.maps["inputs"][idx][IN_WITNESS_UTXO] = utxo
+	def add_witness_utxo(self, idx, tx_hex, vout): #BROKEN
+		tx_obj = Tx.parse(BytesIO(tx_hex))
+		outpoint = tx_obj.tx_outs[vout].serialize()
+		self.psbt.maps["inputs"][idx][IN_WITNESS_UTXO] = outpoint
 
 	def add_sighash_type(self, idx, sighash):
 		self.psbt.maps["inputs"][idx][IN_SIGHASH_TYPE] = int_to_little(n=sighash, length=4)
-
 
 	def add_input_redeem_script(self, idx, script):
 		self.psbt.maps["inputs"][idx][IN_REDEEM_SCRIPT] = script
@@ -364,6 +437,16 @@ class Signer(PSBT_Role):
 		for i in range(len(self.psbt.maps["inputs"])):
 			if self.get_utxo(i) is None:
 				raise PSBTError("Not all inputs have UTXOs filled in.")
+
+	def get_bip32_info(self, idx):
+		for k in self.psbt.maps["inputs"][idx].keys():
+			if k[:1] == IN_BIP32_DERIVATION:
+				pubkey = k[1:]
+		data = self.psbt.maps["inputs"][idx][IN_BIP32_DERIVATION+pubkey]
+		master_fingerprint = data[:4]
+		path = data[4:]
+		return pubkey, master_fingerprint, path
+
 
 	def get_input_pubkey(self, idx):
 		return self.psbt.maps["inputs"][idx][IN_BIP32_DERIVATION][1:]
@@ -394,7 +477,7 @@ class Signer(PSBT_Role):
 			curr_input = self.psbt.maps["inputs"][idx]
 			if IN_NON_WITNESS_UTXO in curr_input:
 				global_txid = Tx.parse(BytesIO(self.psbt.maps["global"][GLOBAL_UNSIGNED_TX])).tx_ins[idx].prev_tx
-				curr_txid = hash256(curr_input[IN_NON_WITNESS_UTXO])[::-1]
+				curr_txid = hash256(curr_input[IN_NON_WITNESS_UTXO])#[::-1]
 				if global_txid != curr_txid:
 					raise PSBTError("UTXO of this input does not match the UTXO specified in global unsigned Tx")
 			elif IN_WITNESS_UTXO in curr_input:
@@ -476,7 +559,6 @@ class Finalizer(PSBT_Role):
 						found_sec = True
 				i[IN_FINAL_SCRIPTSIG] = Script([sig, sec]).serialize()
 			self._clear_keyvalues(i)
-
 		
 	def _check_for_sig(self, an_input):
 		for k in an_input.keys():
@@ -553,8 +635,8 @@ if __name__ == "__main__":
 	# w = Wallet(data=xprv, testnet=True)
 	outputs = [["0014d85c2b71d0060b09c9886aeb815e50991dda124d", 149990000], 
 				["001400aea9a2e5f0f876a588df5546e8742d1d87008f", 100000000]]
-	inputs = [["75ddabb27b8845f5247975c8a5ba7c6f336c4570708ebe230caf6db5217ae858"]
-				["1dea7cd05979072a3578cab271c02244ea8a090bbb46aa680a65ecd027048d83"]]
+	inputs = [["75ddabb27b8845f5247975c8a5ba7c6f336c4570708ebe230caf6db5217ae858", 0],
+				["1dea7cd05979072a3578cab271c02244ea8a090bbb46aa680a65ecd027048d83", 1]]
 	psbt_cr = Creator(inputs, outputs).serialize()
 	psbt_up = Updater(psbt_cr)
 	for i in range(2):
