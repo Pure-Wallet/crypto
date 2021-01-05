@@ -10,3 +10,4 @@ dump.txt
 __pycache__
 **/*.db
 **/*.json
+python/wallet.txt
