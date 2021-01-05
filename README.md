@@ -1,4 +1,4 @@
-#crypto
+# Wallet
 
 This Folder will contain the cryptography libraries for the wallet. I am currently learning from<a href="https://github.com/jimmysong/programmingbitcoin"> Jimmy Song's Programming Bitcoin book</a>. The book is written for Python, so I am coding in Python, but I plan on translating to C++ for the wallet. 
 
